@@ -11,6 +11,6 @@ if not exist build mkdir build
 
 cd ./build
 
-%CLANG% ../src/*.cpp -l %WINSOCKLIB% %FLAGS% -o chat_0.0.1.exe
+%CLANG% ../src/*.cpp -l %WINSOCKLIB% %FLAGS% -o chat_release.exe
 
 cd ..
