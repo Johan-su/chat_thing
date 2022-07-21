@@ -1,3 +1,7 @@
+#define _CRT_SECURE_NO_WARNINGS
+
+#include "data.hpp"
+
 #include <Windows.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -5,11 +9,32 @@
 
 
 
-
-struct ipv4_addr
+static void *spawn_thread(void *func, void *parameter)
 {
-    uint8_t bytes[4];
-};
+    return CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)func, parameter, CREATE_SUSPENDED, NULL);
+}
+
+
+static void suspend_thread(void *thread_handle)
+{
+    SuspendThread(thread_handle);
+}
+
+
+static void resume_thread(void *thread_handle)
+{
+    ResumeThread(thread_handle);
+}
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -110,6 +135,7 @@ if (listen(sockfd, SOMAXCONN) == SOCKET_ERROR)
 
     char buffer [MESSAGE_BUFFER_LEN];
 
+
     int result;
     do
     {
@@ -117,6 +143,7 @@ if (listen(sockfd, SOMAXCONN) == SOCKET_ERROR)
 
         if (result > 0)
         {
+            printf("Recieved \n%s\n", buffer);
             int sendresult = send(client_socket, buffer, result, 0);
         }
         else if (result == 0)
@@ -136,12 +163,59 @@ if (listen(sockfd, SOMAXCONN) == SOCKET_ERROR)
     closesocket(client_socket);
 }
 
-
-static void client(const sockaddr *addr)
+static unsigned long recieve_print(void )
 {
-    connect_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-    int result = connect(connect_socket, addr, sizeof(*addr));
+}
+
+
+static void client(ipv4_addr ip, uint16_t port)
+{
+    sockaddr_in SOCK_addr;
+
+    SOCK_addr.sin_family = AF_INET;
+    SOCK_addr.sin_port = port;
+    SOCK_addr.sin_addr.S_un.S_un_b.s_b1 = ip.bytes[0];
+    SOCK_addr.sin_addr.S_un.S_un_b.s_b2 = ip.bytes[1];
+    SOCK_addr.sin_addr.S_un.S_un_b.s_b3 = ip.bytes[2];
+    SOCK_addr.sin_addr.S_un.S_un_b.s_b4 = ip.bytes[3];
+
+    SOCKET connect_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+
+    if (connect_socket == INVALID_SOCKET)
+    {
+        fprintf(stderr, "ERROR: creating socket failed");
+        exit(1);
+    }
+
+    if (connect(connect_socket, (struct sockaddr *)&SOCK_addr, sizeof(SOCK_addr)) == SOCKET_ERROR)
+    {
+        fprintf(stderr, "ERROR: connecting failed");
+        exit(1);        
+    }
+
+    spawn_thread()
+
+#define BUF_LEN 2048
+    char buf[BUF_LEN];
+    char rec_buf[BUF_LEN];
+
+    while (true)
+    {
+        scanf("%s", buf);
+
+        if (send(connect_socket, buf, BUF_LEN, 0) == SOCKET_ERROR)
+        {
+            fprintf(stderr, "ERROR: send failed with, %d", WSAGetLastError());
+            exit(1);
+        }
+        printf("sent message\n");
+        recv(connect_socket, rec_buf, BUF_LEN, 0);
+        printf("Server recieved message: %s\n", rec_buf);
+    }
+    
+
+
     //TODO(Johan) finish client
 }
 
@@ -206,15 +280,16 @@ static config_t config = {
 
 };
 
-int main(int argc, char *argv[])
+static void init_config(int argc, char *argv[])
 {
     char *program = *argv++;
+/*
     if (argc <= 1)
     {
         fprintf(stderr, "ERROR: Incorrect amount of arguments\n");
         usage_and_quit(program);
     }
-
+*/
 
     while (*argv != NULL)
     {
@@ -246,19 +321,27 @@ int main(int argc, char *argv[])
     }
 
     fprintf(stderr, "DEBUG: config values [ip: %d.%d.%d.%d port: %d host: %d]\n", config.ip.bytes[0], config.ip.bytes[1], config.ip.bytes[2], config.ip.bytes[3], config.port, config.host);
+}
 
 
+
+static void init_windows_socket()
+{
     WORD version = MAKEWORD(2, 2);
-
     WSADATA data;
-
-    int error_code = WSAStartup(version, &data);    
-
-    if (error_code != 0)
+    if (WSAStartup(version, &data) != 0)
     {
         fprintf(stderr, "ERROR: WSAstartup failed because, %d\n", WSAGetLastError());
         exit(1);
     }
+}
+
+
+int main(int argc, char *argv[])
+{
+    init_config(argc, argv);
+    init_windows_socket();
+
 
     SOCKET sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
@@ -278,19 +361,19 @@ int main(int argc, char *argv[])
     sockaddress.sin_addr.S_un.S_un_b.s_b3 = config.ip.bytes[2];
     sockaddress.sin_addr.S_un.S_un_b.s_b4 = config.ip.bytes[3];
 
-    if (bind(sockfd, (struct sockaddr *)&sockaddress, sizeof(sockaddress)) == SOCKET_ERROR)
-    {
-        fprintf(stderr, "ERROR: bind failed because, %d\n", WSAGetLastError());
-        exit(1);
-    }
 
     if (config.host)
     {
+        if (bind(sockfd, (struct sockaddr *)&sockaddress, sizeof(sockaddress)) == SOCKET_ERROR)
+        {
+            fprintf(stderr, "ERROR: bind failed because, %d\n", WSAGetLastError());
+            exit(1);
+        }
         listener(sockfd);
     }
     else
     {
-
+        client(config.ip, config.port);
     }
     
     WSACleanup();
