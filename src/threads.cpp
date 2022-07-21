@@ -1,9 +1,19 @@
 #include "threads.hpp"
+
+#include <stdio.h>
 #include <Windows.h>
 
-void *spawn_thread(void *func, void *parameter)
+
+void *spawn_thread(thread_func *func, void *parameter)
 {
-    return CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)func, parameter, CREATE_SUSPENDED, NULL);
+    void *handle = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)func, parameter, 0, NULL);
+
+    if (handle == NULL)
+    {
+        fprintf(stderr, "ERROR: failed to create thread");
+        exit(1);
+    }
+    return handle;
 }
 
 

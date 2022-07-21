@@ -1,20 +1,26 @@
+#define _CRT_SECURE_NO_WARNINGS
 #include "client.hpp"
 #include "threads.hpp"
+#include "buffer_lengths.hpp"
+
 
 #include <Windows.h>
 #include <stdio.h>
 
-#define BUF_LEN 2048
+
+volatile static bool is_active = false;
 
 static unsigned long receive_print_loop(void *connect_socket_p)
 {
     SOCKET connect_socket = *(SOCKET *)connect_socket_p;
-    char rec_buf[BUF_LEN];
-    while (true)
+    char rec_buf[REC_BUF_LEN];
+    while (is_active)
     {
-        recv(connect_socket, rec_buf, BUF_LEN, 0);
+        recv(connect_socket, rec_buf, REC_BUF_LEN, 0);
         fprintf(stdout, "%s\n", rec_buf);
     }
+    closesocket(connect_socket);
+    return 0;
 }
 
 
@@ -39,27 +45,41 @@ void client(ipv4_addr ip, uint16_t port)
 
     if (connect(connect_socket, (struct sockaddr *)&SOCK_addr, sizeof(SOCK_addr)) == SOCKET_ERROR)
     {
-        fprintf(stderr, "ERROR: connecting failed");
+        fprintf(stderr, "ERROR: connecting failed\n");
         exit(1);        
     }
 
-    void *receive_thread = spawn_thread(receive_print_loop, &connect_socket);
+    is_active = true;
 
-    char buf[BUF_LEN];
+    void *receive_thread = spawn_thread(receive_print_loop, &connect_socket); (void)receive_thread;
 
-    while (true)
+    char name_buf[NAME_LEN];
+    char message_buf[SEND_BUF_LEN];
+
+    char send_buf[REC_BUF_LEN];
+
+
+    sprintf(name_buf, "%llu :: ", connect_socket);
+
+    while (is_active)
     {
-        scanf("%s", buf);
+        scanf("%s", message_buf);
 
-        if (buf[0] == '/' && buf[1] == 'q' && buf[2] == '\0')
 
-        if (send(connect_socket, buf, BUF_LEN, 0) == SOCKET_ERROR)
+        if (message_buf[0] == '/' && message_buf[1] == 'q' && message_buf[2] == '\0')
+        {
+            is_active = false;
+            shutdown(connect_socket, 2); // SD_BOTH
+            break;
+        }
+
+        strcpy(send_buf, name_buf);
+        strcat(send_buf, message_buf);
+
+        if (send(connect_socket, send_buf, REC_BUF_LEN, 0) == SOCKET_ERROR)
         {
             fprintf(stderr, "ERROR: send failed with, %d", WSAGetLastError());
             exit(1);
         }
     }
-
-    destroy_thread(receive_thread);
-    closesocket(connect_socket);
 }
