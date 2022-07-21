@@ -1,40 +1,14 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "data.hpp"
+#include "client.hpp"
+#include "server.hpp"
+
 
 #include <Windows.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-
-
-
-static void *spawn_thread(void *func, void *parameter)
-{
-    return CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)func, parameter, CREATE_SUSPENDED, NULL);
-}
-
-
-static void suspend_thread(void *thread_handle)
-{
-    SuspendThread(thread_handle);
-}
-
-
-static void resume_thread(void *thread_handle)
-{
-    ResumeThread(thread_handle);
-}
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -48,7 +22,6 @@ static void usage_and_quit(const char *program)
     fprintf(f_desc, "-i    ipv4 ip-address\n");
     exit(1);
 }
-
 
 
 static uint16_t parse_port(const char *port, const char *program)
@@ -118,105 +91,8 @@ static ipv4_addr parse_ip(const char *ip, const char *program)
     return ip_obj;
 }
 
-static void listener(SOCKET sockfd)
-{
-if (listen(sockfd, SOMAXCONN) == SOCKET_ERROR)
-    {
-        fprintf(stderr, "ERROR: listen failed because, %d\n", WSAGetLastError());
-        exit(1);
-    }
 
 
-    SOCKET client_socket = accept(sockfd, NULL, NULL);
-
-    closesocket(sockfd);
-
-    #define MESSAGE_BUFFER_LEN 2048
-
-    char buffer [MESSAGE_BUFFER_LEN];
-
-
-    int result;
-    do
-    {
-        result = recv(client_socket, buffer, MESSAGE_BUFFER_LEN, 0);
-
-        if (result > 0)
-        {
-            printf("Recieved \n%s\n", buffer);
-            int sendresult = send(client_socket, buffer, result, 0);
-        }
-        else if (result == 0)
-        {
-            printf("Connection closing\n");
-        }
-        else
-        {
-            fprintf(stderr, "ERROR: recv failed because, %d\n", WSAGetLastError());
-            exit(1);
-        }
-
-
-    } while (result > 0);
-    
-    int shutdown_r = shutdown(client_socket, 1); // SD_SEND
-    closesocket(client_socket);
-}
-
-#define BUF_LEN 2048
-
-static unsigned long recieve_print_loop(void *connect_socket_p)
-{
-    SOCKET connect_socket = (SOCKET *)connect_socket_p;
-    char rec_buf[BUF_LEN];
-    while (true)
-    {
-        recv(connect_socket, rec_buf, BUF_LEN, 0);
-        fprintf(stdout, "%s\n", rec_buf);
-    }
-}
-
-
-static void client(ipv4_addr ip, uint16_t port)
-{
-    sockaddr_in SOCK_addr;
-
-    SOCK_addr.sin_family = AF_INET;
-    SOCK_addr.sin_port = port;
-    SOCK_addr.sin_addr.S_un.S_un_b.s_b1 = ip.bytes[0];
-    SOCK_addr.sin_addr.S_un.S_un_b.s_b2 = ip.bytes[1];
-    SOCK_addr.sin_addr.S_un.S_un_b.s_b3 = ip.bytes[2];
-    SOCK_addr.sin_addr.S_un.S_un_b.s_b4 = ip.bytes[3];
-
-    SOCKET connect_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-
-    if (connect_socket == INVALID_SOCKET)
-    {
-        fprintf(stderr, "ERROR: creating socket failed");
-        exit(1);
-    }
-
-    if (connect(connect_socket, (struct sockaddr *)&SOCK_addr, sizeof(SOCK_addr)) == SOCKET_ERROR)
-    {
-        fprintf(stderr, "ERROR: connecting failed");
-        exit(1);        
-    }
-
-    void *thread1 = spawn_thread(recieve_print_loop, &connect_socket);
-
-    char buf[BUF_LEN];
-
-    while (true)
-    {
-        scanf("%s", buf);
-
-        if (send(connect_socket, buf, BUF_LEN, 0) == SOCKET_ERROR)
-        {
-            fprintf(stderr, "ERROR: send failed with, %d", WSAGetLastError());
-            exit(1);
-        }
-    }
-}
 
 enum FLAGS
 {
@@ -324,7 +200,7 @@ static void init_config(int argc, char *argv[])
 
 
 
-static void init_windows_socket()
+static void init_windows_socket_lib()
 {
     WORD version = MAKEWORD(2, 2);
     WSADATA data;
@@ -339,36 +215,12 @@ static void init_windows_socket()
 int main(int argc, char *argv[])
 {
     init_config(argc, argv);
-    init_windows_socket();
-
-
-    SOCKET sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-
-    if (sockfd == INVALID_SOCKET)
-    {
-        fprintf(stderr, "ERROR: socket failed because, %d\n", WSAGetLastError());
-        exit(1);
-    }
-
-
-    sockaddr_in sockaddress;
-
-    sockaddress.sin_family = AF_INET;
-    sockaddress.sin_port = config.port;
-    sockaddress.sin_addr.S_un.S_un_b.s_b1 = config.ip.bytes[0];
-    sockaddress.sin_addr.S_un.S_un_b.s_b2 = config.ip.bytes[1];
-    sockaddress.sin_addr.S_un.S_un_b.s_b3 = config.ip.bytes[2];
-    sockaddress.sin_addr.S_un.S_un_b.s_b4 = config.ip.bytes[3];
+    init_windows_socket_lib();
 
 
     if (config.host)
     {
-        if (bind(sockfd, (struct sockaddr *)&sockaddress, sizeof(sockaddress)) == SOCKET_ERROR)
-        {
-            fprintf(stderr, "ERROR: bind failed because, %d\n", WSAGetLastError());
-            exit(1);
-        }
-        listener(sockfd);
+        server(config.ip, config.port);
     }
     else
     {
