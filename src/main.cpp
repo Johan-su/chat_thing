@@ -163,9 +163,17 @@ if (listen(sockfd, SOMAXCONN) == SOCKET_ERROR)
     closesocket(client_socket);
 }
 
-static unsigned long recieve_print(void )
-{
+#define BUF_LEN 2048
 
+static unsigned long recieve_print_loop(void *connect_socket_p)
+{
+    SOCKET connect_socket = (SOCKET *)connect_socket_p;
+    char rec_buf[BUF_LEN];
+    while (true)
+    {
+        recv(connect_socket, rec_buf, BUF_LEN, 0);
+        fprintf(stdout, "%s\n", rec_buf);
+    }
 }
 
 
@@ -194,11 +202,9 @@ static void client(ipv4_addr ip, uint16_t port)
         exit(1);        
     }
 
-    spawn_thread()
+    void *thread1 = spawn_thread(recieve_print_loop, &connect_socket);
 
-#define BUF_LEN 2048
     char buf[BUF_LEN];
-    char rec_buf[BUF_LEN];
 
     while (true)
     {
@@ -209,14 +215,7 @@ static void client(ipv4_addr ip, uint16_t port)
             fprintf(stderr, "ERROR: send failed with, %d", WSAGetLastError());
             exit(1);
         }
-        printf("sent message\n");
-        recv(connect_socket, rec_buf, BUF_LEN, 0);
-        printf("Server recieved message: %s\n", rec_buf);
     }
-    
-
-
-    //TODO(Johan) finish client
 }
 
 enum FLAGS
