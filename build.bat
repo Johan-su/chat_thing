@@ -1,6 +1,6 @@
 @echo off
 set CLANG=clang++
-set FLAGS=-O0 -D _DEBUG -g -gcodeview -Wall -Wpedantic -Wno-c++20-designator
+set FLAGS=-O0 -D _DEBUG -g -gcodeview -Wall -Wpedantic -Wextra -Wconversion -Wno-missing-braces -Wno-c++20-designator
 
 set WINSOCKLIB=ws2_32
 
@@ -11,6 +11,6 @@ if not exist build mkdir build
 
 cd ./build
 
-%CLANG% ../src/*.cpp -l %WINSOCKLIB% %FLAGS% -o chat.exe && echo Compilation succeeded
+%CLANG% ../src/*.cpp -l %WINSOCKLIB% %FLAGS% -o chat.exe
 
 cd ..
