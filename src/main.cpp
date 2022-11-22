@@ -1,5 +1,5 @@
-
-
+#define _CRT_SECURE_NO_WARNINGS
+#include <Windows.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -54,7 +54,6 @@ enum class FLAGS
     PORT,
     IP,
 };
-static const Usize flag_count = 3;
 
 struct FlagData
 {
@@ -73,7 +72,7 @@ struct FlagData
 struct Config
 {
     bool host;
-    U32 port;
+    U16 port;
     U8 ip_bytes[4];
 };
 
@@ -138,15 +137,336 @@ static Usize str_len(const char *str)
     return count;
 }
 
+#pragma region Threading
 
-
-
-static FlagData parse_flag_argument(const char *)
+struct Thread
 {
-    return FlagData();
+    bool initalized = false;
+    U32 id;
+    HANDLE win_handle;
+};
+
+static Thread spawn_thread(unsigned long (thread_func)(void *), void *parameters)
+{
+    Thread thread = {};
+    {
+        U32 id;
+        HANDLE handle = CreateThread(nullptr, 0, thread_func, parameters, 0, (unsigned long *)&id);
+        if (handle == nullptr)
+        {
+            TODO("handle error failed to create thread");
+        }
+        thread.initalized = true;
+        thread.id = id;
+        thread.win_handle = handle;
+    }
+    return thread;
+}
+
+static bool is_thread_alive(Thread *thread)
+{
+    if (!thread->initalized)
+        return false;
+
+    U32 exit_code;
+    if (GetExitCodeThread(thread->win_handle, (unsigned long *)&exit_code))
+    {
+        TODO("handle failed to check if thread is alive");
+    }
+
+    if (exit_code == STILL_ACTIVE)
+        return true;
+
+    return false;
+}
+
+static void join_thread(Thread *thread)
+{
+    while (is_thread_alive(thread))
+    {}
 }
 
 
+static void kill_thread(Thread *thread)
+{
+    if (is_thread_alive(thread))
+    {
+        TerminateThread(thread->win_handle, 0);
+        thread->initalized = false;
+    }
+}
+
+
+#pragma endregion
+
+#pragma region Winsocket
+
+static void init_WSA()
+{
+    WORD wsa_version = MAKEWORD(2, 2);
+    WSADATA data;
+    if (WSAStartup(wsa_version, &data) != 0)
+    {
+        TODO("handle WSA startup error");
+    }
+}
+#pragma endregion
+
+#pragma region Client
+
+struct ReceiverParams
+{
+    SOCKET socket;
+    char *receive_buffer;
+    I32 receive_length;
+    volatile bool *receive_lock;
+};
+
+static void receiver(SOCKET socket, char *receive_buffer, I32 receive_length, volatile bool *receive_lock)
+{
+    while(true)
+    {
+        if (!*receive_lock)
+        {
+            I32 flags = 0;
+            I32 bytes_received = recv(socket, receive_buffer, receive_length, flags);
+            if (bytes_received == SOCKET_ERROR)
+            {
+                TODO("Handle failed to receive bytes");
+            }
+            printf("received %d bytes\n", bytes_received);
+            printf("%s\n", receive_buffer);
+            *receive_lock = true;
+        }
+    }
+}
+
+struct SenderParams
+{
+    SOCKET socket;
+    char *send_buffer;
+    I32 send_length;
+    volatile bool *send_lock;
+};
+
+static void sender(SOCKET socket, char *send_buffer, I32 send_length, volatile bool *send_lock)
+{
+    while (true)
+    {
+        if (!*send_lock)
+        {
+            I32 flags = 0;
+            I32 bytes_sent = send(socket, send_buffer, send_length, flags);
+            if (bytes_sent == SOCKET_ERROR)
+            {
+                TODO("handle failed to send bytes");
+            }
+            printf("sent %d bytes\n", bytes_sent);
+            *send_lock = true;
+        }
+    }
+}
+
+
+static unsigned long receiver_threaded(void *param)
+{
+    ReceiverParams *params = (ReceiverParams *)param; 
+    receiver(params->socket, params->receive_buffer, params->receive_length, params->receive_lock);
+    return 0;
+}
+
+
+static unsigned long sender_threaded(void *param)
+{
+    SenderParams *params = (SenderParams *)param; 
+    sender(params->socket, params->send_buffer, params->send_length, params->send_lock);
+    return 0;
+}
+
+
+static void send_message(const char *name, const char *message, char *send_buffer, I32 send_buf_len, volatile bool *send_lock)
+{
+    Usize name_len = str_len(name);
+    Usize message_len = str_len(message);
+    if (name_len + message_len >= send_buf_len)
+    {
+        TODO("handle message is too long");
+    }
+
+    {
+        while (send_lock) {}
+        *send_lock = true;
+        //TODO(Johan): check if it works
+        memcpy(send_buffer, name, sizeof(char) * name_len);
+        memcpy(send_buffer, message, sizeof(char) * message_len);
+        send_buffer[name_len + message_len] = '\0';
+
+        *send_lock = false;
+    }
+}
+
+
+enum ClientSettings
+{
+    RECEIVE_BUF_LEN = 256,
+    SEND_BUF_LEN = RECEIVE_BUF_LEN,
+    NAME_LEN = 32,
+    MESSAGE_LEN = RECEIVE_BUF_LEN - NAME_LEN,
+    COMMAND_BUF_LEN = MESSAGE_LEN,
+};
+
+static void client()
+{
+    SOCKET connect_socket;
+    {
+        connect_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (connect_socket == INVALID_SOCKET)
+        {
+            TODO("handle invalid connect_socket");
+        }
+
+        sockaddr_in SOCK_addr;
+
+        SOCK_addr.sin_family = AF_INET;
+        SOCK_addr.sin_port = g_config.port;
+        SOCK_addr.sin_addr.S_un.S_un_b.s_b1 = g_config.ip_bytes[0];
+        SOCK_addr.sin_addr.S_un.S_un_b.s_b2 = g_config.ip_bytes[1];
+        SOCK_addr.sin_addr.S_un.S_un_b.s_b3 = g_config.ip_bytes[2];
+        SOCK_addr.sin_addr.S_un.S_un_b.s_b4 = g_config.ip_bytes[3];
+
+        if (connect(connect_socket, (const struct sockaddr *)&SOCK_addr, sizeof(SOCK_addr)) == SOCKET_ERROR)
+        {
+            TODO("handle failed connection");
+        }
+    }
+    
+
+
+    {
+        char receive_buf[RECEIVE_BUF_LEN];
+        char send_buf[SEND_BUF_LEN];
+        volatile bool receive_lock = true;
+        volatile bool send_lock = true;
+
+        Thread send_thread = {};
+        Thread receive_thread = {};
+        {
+            SenderParams sparams = {connect_socket, send_buf, SEND_BUF_LEN, &send_lock};
+            ReceiverParams rparams = {connect_socket, receive_buf, RECEIVE_BUF_LEN, &receive_lock};
+
+            send_thread = spawn_thread(receiver_threaded, &sparams);
+            receive_thread = spawn_thread(sender_threaded, &rparams);
+        }
+
+        {
+            char command_buffer[COMMAND_BUF_LEN];
+            char name_buffer[NAME_LEN];
+
+            snprintf(name_buffer, NAME_LEN, "%d.%d.%d.%d",
+                g_config.ip_bytes[0], g_config.ip_bytes[1], g_config.ip_bytes[2], g_config.ip_bytes[3]);
+            
+            while (true)
+            {
+                memset(command_buffer, 0, sizeof(command_buffer));
+                {
+                    char *result = fgets(command_buffer, COMMAND_BUF_LEN, stdin);
+                    if (result == nullptr && ferror(stdin) != 0)
+                    {
+                        TODO("handle error with command_buffer input");
+                    }
+                }
+                if (command_buffer[0] == '/')
+                {
+                    if (is_str(&command_buffer[1], "q"))
+                    {
+                        break;
+                    }
+                    else if (false)
+                    {
+
+                    }
+                    else
+                    {
+                        TODO("handle incorrect command");
+                    }
+                }
+                else
+                {
+                    send_message(name_buffer, command_buffer, send_buf, SEND_BUF_LEN, &send_lock);
+                }
+            }
+        }
+
+        kill_thread(&send_thread);
+        kill_thread(&receive_thread);
+
+        join_thread(&send_thread);
+        join_thread(&receive_thread);
+    }
+}
+
+
+
+#pragma endregion
+
+#pragma region Server
+
+static void accept_connections()
+{
+    
+}
+
+
+
+enum ServerSettings
+{
+    MAX_ACTIVE_THREADS = 128,
+};
+
+struct Client
+{
+    bool active = false;
+    Thread thread;
+    SOCKET socket;
+}
+
+struct ClientPool
+
+
+static void server()
+{
+    SOCKET server_socket;
+    {
+        server_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (server_socket == INVALID_SOCKET)
+        {
+            TODO("handle failed to create server socket");
+        }
+
+        sockaddr_in SOCK_addr;
+
+        SOCK_addr.sin_family = AF_INET;
+        SOCK_addr.sin_port = g_config.port;
+        SOCK_addr.sin_addr.S_un.S_un_b.s_b1 = g_config.ip_bytes[0];
+        SOCK_addr.sin_addr.S_un.S_un_b.s_b2 = g_config.ip_bytes[1];
+        SOCK_addr.sin_addr.S_un.S_un_b.s_b3 = g_config.ip_bytes[2];
+        SOCK_addr.sin_addr.S_un.S_un_b.s_b4 = g_config.ip_bytes[3];
+
+        if (bind(server_socket, (struct sockaddr *)&SOCK_addr, sizeof(SOCK_addr)) == SOCKET_ERROR)
+        {
+            TODO("handle failed to bind server socket to ip address");
+        }
+
+        if (listen(server_socket, SOMAXCONN) == SOCKET_ERROR)
+        {
+            TODO("handle failed to set socket to listener");
+        }
+    }
+
+
+}
+
+#pragma endregion
 
 int main (int argc, char *argv[])
 {
@@ -157,7 +477,7 @@ int main (int argc, char *argv[])
     {
         if (argv[i][0] == '-')
         {
-            if (is_str(&argv[i][1], "h"))
+            if (is_str(&argv[i][1], "h") && argv[i][2] == '\0')
             {
                 g_config.host = true;
                 continue;
@@ -211,7 +531,7 @@ int main (int argc, char *argv[])
                 {
                     TODO("Handle port length error");
                 }
-                U32 result;
+                U16 result;
                 {
                     char str_int_buffer[6];
                     for (I32 j = 0; j < 5 && argv[i + 1][j] != '\0'; ++j)
@@ -223,7 +543,7 @@ int main (int argc, char *argv[])
                         str_int_buffer[j] = argv[i + 1][j]; 
                     }
                     str_int_buffer[5] = '\0';
-                    result = (U32)atoi(str_int_buffer);
+                    result = (U16)atoi(str_int_buffer);
                 }
 
                 if (result < 0 || result > 65535)
@@ -239,5 +559,7 @@ int main (int argc, char *argv[])
 
     printf("Config [Host: %u, port: %u, Ip: %u.%u.%u.%u]\n", g_config.host, g_config.port, g_config.ip_bytes[0], g_config.ip_bytes[1], g_config.ip_bytes[2], g_config.ip_bytes[3]);
     
+
+    init_WSA();
     return 0;
 } 
