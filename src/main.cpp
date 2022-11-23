@@ -67,8 +67,6 @@ struct FlagData
     
 };
 
-
-
 struct Config
 {
     bool host;
@@ -76,15 +74,11 @@ struct Config
     U8 ip_bytes[4];
 };
 
-
-
 static Config g_config = {
     .host = false,
     .port = 25565,
     .ip_bytes = {127, 0, 0, 1},
 }; 
-
-
 
 static bool is_str(const char *str1, const char *str2)
 {
@@ -106,7 +100,6 @@ static bool is_str(const char *str1, const char *str2)
     return true;
 }
 
-
 static bool is_number(char chr)
 {
     switch (chr)
@@ -125,7 +118,6 @@ static bool is_number(char chr)
         default: return false;
     }
 }
-
 
 static Usize str_len(const char *str)
 {
@@ -224,7 +216,7 @@ struct ReceiverParams
 
 static void receiver(SOCKET socket, char *receive_buffer, I32 receive_length, volatile bool *receive_lock)
 {
-    while(true)
+    while (true)
     {
         if (!*receive_lock)
         {
@@ -315,7 +307,7 @@ enum ClientSettings
     COMMAND_BUF_LEN = MESSAGE_LEN,
 };
 
-static void client()
+static void client(const char *name_buffer, I32 name_length)
 {
     SOCKET connect_socket;
     {
@@ -360,10 +352,6 @@ static void client()
 
         {
             char command_buffer[COMMAND_BUF_LEN];
-            char name_buffer[NAME_LEN];
-
-            snprintf(name_buffer, NAME_LEN, "%d.%d.%d.%d",
-                g_config.ip_bytes[0], g_config.ip_bytes[1], g_config.ip_bytes[2], g_config.ip_bytes[3]);
             
             while (true)
             {
@@ -411,13 +399,6 @@ static void client()
 
 #pragma region Server
 
-static void accept_connections()
-{
-    
-}
-
-
-
 enum ServerSettings
 {
     MAX_ACTIVE_THREADS = 128,
@@ -428,12 +409,50 @@ struct Client
     bool active = false;
     Thread thread;
     SOCKET socket;
+};
+
+static void accept_connections(SOCKET server_socket, Client *client_pool, Usize client_pool_length, Usize *connection_count, volatile bool *accept_lock)
+{
+    while (true)
+    {
+        struct sockaddr_in socket_addr = {};
+        socket_addr.sin_family = AF_INET;
+        I32 addr_len;
+        while (*accept_lock) 
+        {}
+        if (*connection_count < MAX_ACTIVE_THREADS)
+        {
+            SOCKET tmp_socket = accept(server_socket, (struct sockaddr *)&socket_addr, &addr_len);
+            if (tmp_socket == INVALID_SOCKET)
+            {
+                TODO("handle error failed to accept connection");
+            }
+            while (*accept_lock)
+            {}
+            //TODO(Johan): add printing of connection and send into to every active thread
+            {
+                I32 i = 0;
+                for (i = 0; i < client_pool_length; ++i)
+                {
+                    if (!client_pool[i].active)
+                    {
+                        *connection_count += 1;
+                        client_pool[i].socket = tmp_socket;
+                        client_pool[i].thread = spawn_thread();
+                        break;
+                    }
+                }
+                assert(i != client_pool_length - 1);
+
+            }
+        }
+    }
 }
 
-struct ClientPool
+static Usize connection_count = 0;
+static Client client_pool[MAX_ACTIVE_THREADS] = {};
 
-
-static void server()
+static void server(const char *name_buffer, I32 name_len)
 {
     SOCKET server_socket;
     {
@@ -463,10 +482,20 @@ static void server()
         }
     }
 
+    Thread connection_thread = {};
+    {
+        spawn_thread()
+    }
+
+
+
+
 
 }
 
 #pragma endregion
+
+static char name_buffer[NAME_LEN] = {};
 
 int main (int argc, char *argv[])
 {
@@ -551,6 +580,21 @@ int main (int argc, char *argv[])
                     TODO("handle invalid port");
                 }
                 g_config.port = result;
+                i += 1;
+                continue;
+            }
+            else if (is_str(&argv[i][1], "n"))
+            {
+                Usize length = str_len(argv[i + 1]);
+                if (length >= ClientSettings::NAME_LEN)
+                {
+                    TODO("handle error too long name, max 31 characters");
+                }
+
+                memcpy(name_buffer, argv[i + 1], sizeof(char) * length);
+                name_buffer[length] = '\0';
+
+
                 i += 1;
                 continue;
             }
