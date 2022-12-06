@@ -1,6 +1,6 @@
 @echo off
 set CLANG=clang++
-set FLAGS=-O0 -D _DEBUG -g -gcodeview -Wall -Wpedantic -Wextra -Wconversion -Wno-missing-braces -Wno-c++20-designator
+set FLAGS=-O0 -D _DEBUG -g -gcodeview -Wall -Wpedantic -Wextra -Wconversion -Wshadow -Wno-missing-braces -Wno-c++20-designator
 
 set WINSOCKLIB=ws2_32
 
