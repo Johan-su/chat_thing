@@ -19,14 +19,14 @@ typedef int64_t I64;
 #define DEBUG_ASSERTS
 
 #ifdef DEBUG_ASSERTS
-#define assert(expression)                                                                                 \
-    do                                                                                                     \
-    {                                                                                                      \
-        if (!(expression))                                                                                 \
-        {                                                                                                  \
-            fprintf(stderr, "ERROR: assertion failed %s, at %s:%d in \n", __FILE__, __LINE__);             \
-            exit(1);                                                                                       \
-        }                                                                                                  \
+#define assert(expression)                                                                                  \
+    do                                                                                                      \
+    {                                                                                                       \
+        if (!(expression))                                                                                  \
+        {                                                                                                   \
+            fprintf(stderr, "ERROR: assertion failed %s, at %s:%d in \n", #expression, __FILE__, __LINE__); \
+            exit(1);                                                                                        \
+        }                                                                                                   \
     } while (0)
 #else
 #define assert(expression)
@@ -39,6 +39,8 @@ typedef int64_t I64;
         exit(1);                                                                       \
     } while (0)
 
+
+#define ARRAY_COUNT(array) sizeof(array) / sizeof(array[0])
 
 
 template <typename T>
@@ -134,16 +136,24 @@ static Usize str_len(const char *str)
 struct Thread
 {
     bool initalized = false;
+    bool suspended = false;
     U32 id;
     HANDLE win_handle;
 };
 
-static Thread spawn_thread(unsigned long (thread_func)(void *), void *parameters)
+static Thread spawn_thread(unsigned long (thread_func)(void *), bool suspended, void *parameters)
 {
     Thread thread = {};
     {
+
+        U32 creation_flags = 0;
+        if (suspended)
+        {
+            creation_flags = CREATE_SUSPENDED;
+        }
+
         U32 id;
-        HANDLE handle = CreateThread(nullptr, 0, thread_func, parameters, 0, (unsigned long *)&id);
+        HANDLE handle = CreateThread(nullptr, 0, thread_func, parameters, creation_flags, (unsigned long *)&id);
         if (handle == nullptr)
         {
             TODO("handle error failed to create thread");
@@ -178,7 +188,6 @@ static void join_thread(Thread *thread)
     {}
 }
 
-
 static void kill_thread(Thread *thread)
 {
     if (is_thread_alive(thread))
@@ -188,6 +197,36 @@ static void kill_thread(Thread *thread)
     }
 }
 
+static void resume_thread(Thread *thread)
+{
+    if (thread->suspended)
+    {
+        ResumeThread(thread->win_handle);
+        thread->suspended = false;
+    }
+}
+
+static void suspend_thread(Thread *thread)
+{
+    if (!thread->suspended)
+    {
+        thread->suspended = true;
+        SuspendThread(thread->win_handle);
+    }
+}
+
+static Thread get_current_thread()
+{   
+    HANDLE win_handle = GetCurrentThread();
+
+    Thread thread = {
+        .initalized = true,
+        .suspended = false,
+        .id = GetThreadId(win_handle),
+        .win_handle = win_handle,
+    };
+    return thread;
+}
 
 #pragma endregion
 
@@ -204,113 +243,167 @@ static void init_WSA()
 }
 #pragma endregion
 
+enum DataFormat
+{
+    INVALID,
+    PUBLIC_MESSAGE,
+    PRIVATE_MESSAGE,
+    NAME_CHANGE,
+    COMMAND,
+    SERVER_BROADCAST,
+};
 
-static void send_message(const char *name, const char *message, char *send_buffer, I32 send_buf_len, volatile bool *send_lock)
+
+enum Settings
+{
+    RECEIVE_BUF_LEN = 256,
+    SEND_BUF_LEN = RECEIVE_BUF_LEN,
+    DATA_HEADER_LEN = sizeof(DataFormat),
+    MAX_DATA_LEN = RECEIVE_BUF_LEN - DATA_HEADER_LEN,
+    MAX_NAME_LEN = 32,
+    MAX_MESSAGE_LEN = MAX_DATA_LEN - MAX_NAME_LEN - 1, // -1 for separator
+};
+
+//TODO(Johan): was last here
+
+struct PublicMessage
+{
+    DataFormat format = PUBLIC_MESSAGE;
+    char message[MAX_MESSAGE_LEN];
+};
+
+
+struct ServerBroadcast
+{
+    DataFormat format = SERVER_BROADCAST;
+    char name[MAX_NAME_LEN]
+    char data[MAX_MESSAGE_LEN];
+}
+
+
+#pragma region Client
+
+enum ClientSettings
+{
+    MAX_COMMAND_LEN = MAX_DATA_LEN,
+    MAX_ACTIVE_CLIENT_THREADS = 5,
+};
+
+struct MessageThreadData
+{
+    volatile U64 queue_count = 0;
+    volatile bool send_lock = true;
+    Thread *thread_queue[MAX_ACTIVE_CLIENT_THREADS] = {};
+    char message_buffer[SEND_BUF_LEN] = {};
+
+};
+
+static MessageThreadData g_message_thread_data = {};
+
+static unsigned long client_sender(void *)
+{
+    while (true)
+    {
+        // if not nullptr something is at the start of the stack
+        if (g_message_thread_data.queue_count != 0 &&
+            g_message_thread_data.thread_queue[g_message_thread_data.queue_count - 1] != nullptr)
+        {
+            //TODO(Johan): maybe change message queue from stack to FIFO
+            resume_thread(g_message_thread_data.thread_queue[g_message_thread_data.queue_count - 1]);
+            g_message_thread_data.thread_queue[g_message_thread_data.queue_count] = nullptr;
+            InterlockedDecrement64((volatile LONG64 *)&g_message_thread_data.queue_count);
+
+            // wait on sender thread to copy data to send buffer
+            while (g_message_thread_data.send_lock)
+            {}
+
+            memset(g_message_thread_data.message_buffer, 0, sizeof(g_message_thread_data.message_buffer));
+            g_message_thread_data.send_lock = true;
+        }
+    }
+    return 0;
+}
+
+static void push_on_client_thread_queue_and_suspend(Thread *thread, U64 queue_pos)
+{
+    if (queue_pos >= ARRAY_COUNT(g_message_thread_data.thread_queue))
+    {
+        TODO("Handle error max threads in server message queue");
+    }
+
+    g_message_thread_data.thread_queue[queue_pos] = thread;
+    suspend_thread(thread);
+}
+
+static void send_data(Thread *self, const char *byte_buffer, Usize buf_size)
+{
+    if (buf_size > sizeof(g_message_thread_data.message_buffer))
+    {
+        TODO("handle data is too big");
+    }
+
+    {
+        U64 queue_pos = (U64)InterlockedIncrement64((volatile LONG64 *)&g_message_thread_data.send_lock) - 1;
+        push_on_client_thread_queue_and_suspend(self, queue_pos);
+    }
+
+
+    memcpy(g_message_thread_data.message_buffer, byte_buffer, buf_size);
+    g_message_thread_data.send_lock = false;
+}
+
+static void send_message(Thread *self, const char *name, const char *message)
 {
     Usize name_len = str_len(name);
     Usize message_len = str_len(message);
-    if (name_len + message_len >= send_buf_len)
+    if (name_len + 1 + message_len > sizeof(g_message_thread_data.message_buffer))
     {
         TODO("handle message is too long");
     }
 
-    {
-        while (send_lock) {}
-        *send_lock = true;
-        //TODO(Johan): check if it works
-        memcpy(send_buffer, name, sizeof(char) * name_len);
-        memcpy(send_buffer, message, sizeof(char) * message_len);
-        send_buffer[name_len + message_len] = '\0';
 
-        *send_lock = false;
-    }
+    char buffer[SEND_BUF_LEN] = {};
+
+    memcpy(buffer, name, sizeof(*name) * name_len);
+    buffer[name_len] = ':';
+    memcpy(buffer + name_len + 1, message, sizeof(*name) * message_len);
+
+    send_data(self, buffer, sizeof(char) * (name_len + 1 + message_len));
+
 }
 
-#pragma region Client
 
 struct ReceiverParams
 {
+    Thread *self;
     SOCKET socket;
     char *receive_buffer;
-    I32 receive_length;
-    volatile bool *receive_lock;
+    I32 receive_len;
 };
 
-static void receiver(SOCKET socket, char *receive_buffer, I32 receive_length, volatile bool *receive_lock)
+static unsigned long receiver(void *param)
 {
+    ReceiverParams *p = (ReceiverParams *)param; 
     while (true)
     {
-        if (!*receive_lock)
+        I32 flags = 0;
+        I32 bytes_received = recv(p->socket, p->receive_buffer, p->receive_len, flags);
+        if (bytes_received == SOCKET_ERROR)
         {
-            I32 flags = 0;
-            I32 bytes_received = recv(socket, receive_buffer, receive_length, flags);
-            if (bytes_received == SOCKET_ERROR)
-            {
-                TODO("Handle failed to receive bytes");
-            }
-            printf("received %d bytes\n", bytes_received);
-            printf("%s\n", receive_buffer);
-            *receive_lock = true;
+            TODO("handle error receiving message from server");
         }
+        printf("received %d bytes\n", bytes_received);
+
+        
+
+        printf("%s\n", p->receive_buffer);
+
+
     }
-}
-
-struct SenderParams
-{
-    SOCKET socket;
-    char *send_buffer;
-    I32 send_length;
-    volatile bool *send_lock;
-};
-
-static void sender(SOCKET socket, char *send_buffer, I32 send_length, volatile bool *send_lock)
-{
-    while (true)
-    {
-        if (!*send_lock)
-        {
-            I32 flags = 0;
-            I32 bytes_sent = send(socket, send_buffer, send_length, flags);
-            if (bytes_sent == SOCKET_ERROR)
-            {
-                TODO("handle failed to send bytes");
-            }
-            printf("sent %d bytes\n", bytes_sent);
-            *send_lock = true;
-        }
-    }
-}
-
-
-static unsigned long receiver_threaded(void *param)
-{
-    ReceiverParams *params = (ReceiverParams *)param; 
-    receiver(params->socket, params->receive_buffer, params->receive_length, params->receive_lock);
     return 0;
 }
 
-
-static unsigned long sender_threaded(void *param)
-{
-    SenderParams *params = (SenderParams *)param; 
-    sender(params->socket, params->send_buffer, params->send_length, params->send_lock);
-    return 0;
-}
-
-
-
-
-
-enum ClientSettings
-{
-    RECEIVE_BUF_LEN = 256,
-    SEND_BUF_LEN = RECEIVE_BUF_LEN,
-    NAME_LEN = 32,
-    MESSAGE_LEN = RECEIVE_BUF_LEN - NAME_LEN,
-    COMMAND_BUF_LEN = MESSAGE_LEN,
-};
-
-static void client(const char *name_buffer, I32 name_length)
+static void client(const char *name_buffer)
 {
     SOCKET connect_socket;
     {
@@ -335,32 +428,36 @@ static void client(const char *name_buffer, I32 name_length)
         }
     }
     
-
-
     {
         char receive_buf[RECEIVE_BUF_LEN];
-        char send_buf[SEND_BUF_LEN];
-        volatile bool receive_lock = true;
-        volatile bool send_lock = true;
 
         Thread send_thread = {};
-        Thread receive_thread = {};
         {
-            SenderParams sparams = {connect_socket, send_buf, SEND_BUF_LEN, &send_lock};
-            ReceiverParams rparams = {connect_socket, receive_buf, RECEIVE_BUF_LEN, &receive_lock};
-
-            send_thread = spawn_thread(receiver_threaded, &sparams);
-            receive_thread = spawn_thread(sender_threaded, &rparams);
+            send_thread = spawn_thread(client_sender, false, nullptr);
         }
 
+        Thread receive_thread = {};
         {
-            char command_buffer[COMMAND_BUF_LEN];
+            ReceiverParams rparams = {
+                .self = &receive_thread,
+                .socket = connect_socket,
+                .receive_buffer = receive_buf,
+                .receive_len = ARRAY_COUNT(receive_buf),
+            };
+
+            receive_thread = spawn_thread(receiver, false, &rparams);
+        }
+
+
+        Thread self = get_current_thread();
+        {
+            char command_buffer[MAX_COMMAND_LEN + 1]; // + 1 for null termination
             
             while (true)
             {
                 memset(command_buffer, 0, sizeof(command_buffer));
                 {
-                    char *result = fgets(command_buffer, COMMAND_BUF_LEN, stdin);
+                    char *result = fgets(command_buffer, ARRAY_COUNT(command_buffer), stdin);
                     if (result == nullptr && ferror(stdin) != 0)
                     {
                         TODO("handle error with command_buffer input");
@@ -383,7 +480,7 @@ static void client(const char *name_buffer, I32 name_length)
                 }
                 else
                 {
-                    send_message(name_buffer, command_buffer, send_buf, SEND_BUF_LEN, &send_lock);
+                    send_message(&self, name_buffer, command_buffer);
                 }
             }
         }
@@ -416,103 +513,48 @@ struct Client
     SOCKET socket;
 };
 
-static void client_to_server_receiver(SOCKET client_socket, char *receive_buffer, I32 receive_len, volatile bool *receieve_lock)
+struct ClientToServerReceiverParams
 {
-    while (true)
-    {
-        if (!*receieve_lock)
-        {
-            I32 flags = 0;
-            I32 bytes_received = recv(client_socket, receive_buffer, receive_len, flags);
-            if (bytes_received == SOCKET_ERROR)
-            {
-                TODO("handle error receiving message from client");
-            }
-
-            *receieve_lock = true;
-        }
-    }
-}
-
-struct ToServerReceiverParams
-{
+    Thread *self;
     SOCKET client_socket;
     char *receive_buffer;
     I32 receive_len;
-    volatile bool *receieve_lock;
 };
 
-static unsigned long client_to_server_receiver_threaded(void *param)
-{
-    ToServerReceiverParams *tsrp = (ToServerReceiverParams *)param;
-    client_to_server_receiver(tsrp->client_socket, tsrp->receive_buffer, tsrp->receive_len, tsrp->receieve_lock);
-    return 0;
-}
+static volatile Usize g_connection_count = 0;
+static Client g_client_pool[MAX_ACTIVE_THREADS] = {};
 
-static void accept_connections(SOCKET server_socket, Client *client_pool, Usize client_pool_length, Usize *connection_count, volatile bool *accept_lock, char *send_buffer, I32 send_buffer_len, volatile bool *send_lock)
+static volatile U64 g_server_data_queue_count = 0;
+static volatile bool g_server_data_send_lock = true;
+static char g_server_data_buffer[SERVER_SEND_BUF_LEN] = {};
+
+// + 10 to account for main thread and other non-client threads
+static Thread *g_server_message_thread_queue[MAX_ACTIVE_THREADS + 10] = {};
+
+static unsigned long server_sender(void *)
 {
     while (true)
     {
-        struct sockaddr_in socket_addr = {};
-        socket_addr.sin_family = AF_INET;
-        I32 addr_len;
-        while (*accept_lock) 
-        {}
-        if (*connection_count < MAX_ACTIVE_THREADS)
+        // if not nullptr something is at the start of the stack
+        if (g_server_data_queue_count != 0 && 
+            g_server_message_thread_queue[g_server_data_queue_count - 1] != nullptr)
         {
-            SOCKET tmp_socket = accept(server_socket, (struct sockaddr *)&socket_addr, &addr_len);
-            if (tmp_socket == INVALID_SOCKET)
-            {
-                TODO("handle error failed to accept connection");
-            }
-            while (*accept_lock)
+            //TODO(Johan): maybe change message queue from stack to FIFO
+            resume_thread(g_server_message_thread_queue[g_server_data_queue_count - 1]);
+            g_server_message_thread_queue[g_server_data_queue_count] = nullptr;
+            InterlockedDecrement64((volatile LONG64 *)&g_server_data_queue_count);
+
+            // wait on broadcasting thread to copy data to send buffer
+            while (g_server_data_send_lock)
             {}
-            send_message("Server", "Someone connected", send_buffer, send_buffer_len, send_lock);
-            //TODO(Johan): add printing of connection and send into to every active thread
+
+            for (Usize i = 0; i < ARRAY_COUNT(g_client_pool); ++i)
             {
-                I32 i = 0;
-                for (i = 0; i < client_pool_length; ++i)
+                if (g_client_pool[i].active)
                 {
-                    if (!client_pool[i].active)
-                    {
-                        *connection_count += 1;
-                        client_pool[i].active = true;
-                        client_pool[i].receive_lock = true; 
-                        client_pool[i].socket = tmp_socket;
-
-                        {
-                            ToServerReceiverParams tsrp = 
-                            {
-                                .client_socket = client_pool[i].socket,
-                                .receive_buffer = client_pool[i].receive_buf,
-                                .receive_len = SERVER_RECEIVE_BUF_LEN,
-                                .receieve_lock = &client_pool[i].receive_lock,
-                            }; 
-
-                            client_pool[i].thread = spawn_thread(client_to_server_receiver_threaded, (void *)&tsrp);
-                        }
-                        break;
-                    }
-                }
-                assert(i != client_pool_length - 1);
-
-            }
-        }
-    }
-}
-
-static void server_sender(Client *client_pool, Usize client_pool_len, char *send_buffer, I32 send_length, volatile bool *send_lock)
-{
-    while (true)
-    {
-        if (!*send_lock)
-        {
-            for (I32 i = 0; i < client_pool_len; ++i)
-            {
-                if (client_pool[i].active)
-                {
+                    I32 send_len = (I32)str_len(g_server_data_buffer) + 1;
                     I32 flags = 0;
-                    I32 bytes_sent = send(client_pool[i].socket, send_buffer, send_length, flags);
+                    I32 bytes_sent = send(g_client_pool[i].socket, g_server_data_buffer, send_len, flags);
                     if (bytes_sent == SOCKET_ERROR)
                     {
                         TODO("handle failed to send bytes");
@@ -520,53 +562,167 @@ static void server_sender(Client *client_pool, Usize client_pool_len, char *send
                     printf("sent %d bytes\n", bytes_sent);
                 }
             }
-            *send_lock = true;
+            memset(g_server_data_buffer, 0, sizeof(g_server_data_buffer));
+            g_server_data_send_lock = true;
         }
+    }
+    return 0;
+}
+
+
+static void push_on_server_thread_queue_and_suspend(Thread *thread, U64 queue_pos)
+{
+    if (queue_pos >= ARRAY_COUNT(g_server_message_thread_queue))
+    {
+        TODO("Handle error max threads in server message queue");
+    }
+
+    g_server_message_thread_queue[queue_pos] = thread;
+    suspend_thread(thread);
+}
+
+
+static void broadcast_message_to_all_clients(const char *name, const char *message, Thread *self)
+{
+    Usize name_len = str_len(name);
+    Usize message_len = str_len(message);
+    if (name_len + message_len >= ARRAY_COUNT(g_server_data_buffer))
+    {
+        TODO("handle message is too long");
+    }
+
+    {
+        U64 queue_pos = (U64)InterlockedIncrement64((volatile LONG64 *)&g_server_data_queue_count) - 1;
+        push_on_server_thread_queue_and_suspend(self, queue_pos);
+    }
+
+    memcpy(g_server_data_buffer, name, sizeof(char) * name_len); // - 1 to remove null termination char
+    g_server_data_buffer[name_len] = ':';
+    memcpy(g_server_data_buffer + name_len + 1, message, sizeof(char) * message_len);
+    g_server_data_buffer[name_len + message_len + 1] = '\0';
+    printf("%s: %s\n", name, message);
+    g_server_data_send_lock = false;
+}
+
+static void receive_data_server(char *raw_data, Usize data_len)
+{
+    DataFormat *format = (DataFormat *)raw_data;
+    switch (*format)
+    {
+        case DataFormat::INVALID:
+        {
+            TODO("handle invalid data");
+        } break;
+
+        case DataFormat::PUBLIC_MESSAGE:
+        {
+            PublicMessage *message = (PublicMessage *)raw_data;
+            broadcast_message_to_all_clients()
+
+        } break;
+
+        case DataFormat::PRIVATE_MESSAGE:
+        {
+
+        } break;
+
+        case DataFormat::NAME_CHANGE:
+        {
+
+        } break;
+
+        case DataFormat::COMMAND:
+        {
+
+        } break;
+
     }
 }
 
-
-
-struct ConnectionsParams
+static unsigned long client_to_server_receiver(void *param)
 {
+   ClientToServerReceiverParams *p = (ClientToServerReceiverParams *)param; 
+    while (true)
+    {
+        I32 flags = 0;
+        I32 bytes_received = recv(p->client_socket, p->receive_buffer, p->receive_len, flags);
+        if (bytes_received == SOCKET_ERROR)
+        {
+            TODO("handle error receiving message from client");
+        }
+
+        TODO("fix");
+
+        //TODO(Johan): fix 
+        // const char *name = p->receive_buffer;
+        // const char *message = &p->receive_buffer[NAME_LEN]; 
+        // broadcast_message_to_all_clients(name, message, p->self);
+    }
+    return 0;
+}
+
+
+
+struct AcceptConnectionsParams
+{
+    Thread *self;
     SOCKET server_socket;
-    Client *client_pool;
-    Usize client_pool_length;
-    Usize *connection_count;
-    volatile bool *accept_lock;
-    char *send_buffer;
-    I32 send_buffer_len;
-    volatile bool *send_lock;
 };
 
-static unsigned long accept_connections_threaded(void *param)
+static unsigned long accept_connections(void *param)
 {
-    ConnectionsParams *cp = (ConnectionsParams *)param;
-    accept_connections(cp->server_socket, cp->client_pool, cp->client_pool_length, cp->connection_count, cp->accept_lock, cp->send_buffer, cp->send_buffer_len, cp->send_lock);
+    AcceptConnectionsParams *p = (AcceptConnectionsParams *)param;
+    while (true)
+    {
+        struct sockaddr_in socket_addr = {};
+        socket_addr.sin_family = AF_INET;
+        I32 addr_len = sizeof(socket_addr);
+        if (g_connection_count < MAX_ACTIVE_THREADS)
+        {
+            SOCKET tmp_socket = accept(p->server_socket, (struct sockaddr *)&socket_addr, &addr_len);
+            if (tmp_socket == INVALID_SOCKET)
+            {
+                fprintf(stderr, "failed to accept connection with, %d \n", WSAGetLastError());
+                exit(1);
+                TODO("handle error failed to accept connection");
+            }
+
+
+            // spawn receiver thread
+            {
+                U32 i = 0;
+                for (i = 0; i < ARRAY_COUNT(g_client_pool); ++i)
+                {
+                    if (!g_client_pool[i].active)
+                    {
+                        g_connection_count += 1;
+                        g_client_pool[i].receive_lock = true; 
+                        g_client_pool[i].socket = tmp_socket;
+                        g_client_pool[i].active = true;
+
+                        {
+                            ClientToServerReceiverParams ctsrp = {
+                                .self = &g_client_pool[i].thread,
+                                .client_socket = g_client_pool->socket,
+                                .receive_buffer = g_client_pool->receive_buf,
+                                .receive_len = ARRAY_COUNT(g_client_pool->receive_buf), 
+                            };
+
+                            g_client_pool[i].thread = spawn_thread(client_to_server_receiver, false, (void *)&ctsrp);
+                        }
+                        break;
+                    }
+                }
+                assert(i != ARRAY_COUNT(g_client_pool) - 1); // max client amount reached
+            }
+            broadcast_message_to_all_clients("Server", "Someone connected", p->self);
+        }
+    }
     return 0;
 }
 
-struct ServerSenderParams
-{
-    Client *client_pool;
-    Usize client_pool_len;
-    char *send_buffer;
-    I32 send_length;
-    volatile bool *send_lock;
-};
 
-static unsigned long server_sender_threaded(void *param)
-{
-    ServerSenderParams *ssp = (ServerSenderParams *)param;
-    server_sender(ssp->client_pool, ssp->client_pool_len, ssp->send_buffer, ssp->send_length, ssp->send_lock);
-    return 0;
-}
-
-
-static Usize g_connection_count = 0;
-static Client g_client_pool[MAX_ACTIVE_THREADS] = {};
-
-static void server(const char *name_buffer, I32 name_len)
+static void server()
 {
     SOCKET server_socket;
     {
@@ -597,39 +753,20 @@ static void server(const char *name_buffer, I32 name_len)
     }
 
     {
-        char send_buffer[SERVER_SEND_BUF_LEN] = {};
-        volatile bool send_lock = true;
-
-        ServerSenderParams ssp = {};
-        ssp.client_pool = g_client_pool;
-        ssp.client_pool_len = MAX_ACTIVE_THREADS;
-        ssp.send_buffer = send_buffer;
-        ssp.send_length = SERVER_SEND_BUF_LEN;
-        ssp.send_lock = &send_lock;
-
         Thread sender_thread = {};
         {
-            sender_thread = spawn_thread(server_sender_threaded, (void *)&ssp);
+            sender_thread = spawn_thread(server_sender, false, nullptr);
         }
-
-        volatile bool accept_lock = true;
-
-        ConnectionsParams cp =
-        {
-            .server_socket = server_socket,
-            .client_pool = g_client_pool,
-            .client_pool_length = MAX_ACTIVE_THREADS,
-            .connection_count = &g_connection_count,
-            .accept_lock = &accept_lock,
-            .send_buffer = send_buffer,
-            .send_buffer_len = SERVER_SEND_BUF_LEN,
-            .send_lock = &send_lock,
-        };
 
 
         Thread connection_thread = {};
         {
-            connection_thread =  spawn_thread(accept_connections_threaded, (void *)&cp);
+            AcceptConnectionsParams acp = {
+                .self = &connection_thread,
+                .server_socket = server_socket,
+            };
+
+            connection_thread =  spawn_thread(accept_connections, false, (void *)&acp);
         }
     }
 
@@ -639,7 +776,7 @@ static void server(const char *name_buffer, I32 name_len)
 
 #pragma endregion
 
-static char g_name_buffer[NAME_LEN] = {};
+static char g_name_buffer[MAX_NAME_LEN + 1] = {}; // + 1 for null termination
 
 int main (int argc, char *argv[])
 {
@@ -730,9 +867,9 @@ int main (int argc, char *argv[])
             else if (is_str(&argv[i][1], "n"))
             {
                 Usize length = str_len(argv[i + 1]);
-                if (length >= ClientSettings::NAME_LEN)
+                if (length >= ARRAY_COUNT(g_name_buffer))
                 {
-                    TODO("handle error too long name, max 31 characters");
+                    TODO("handle error too long name, max characters reached");
                 }
 
                 memcpy(g_name_buffer, argv[i + 1], sizeof(char) * length);
@@ -751,11 +888,11 @@ int main (int argc, char *argv[])
 
     if (g_config.host == true)
     {
-        server(g_name_buffer, NAME_LEN);
+        server();
     }
     else
     {
-        client(g_name_buffer, NAME_LEN);
+        client(g_name_buffer);
     }
 
     return 0;
