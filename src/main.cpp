@@ -131,6 +131,16 @@ static Usize str_len(const char *str)
     return count;
 }
 
+static Usize str_nlen(const char *str, Usize max)
+{
+    Usize count = 0;
+    while (str[count] != '\0' && count < max)
+    {
+        count += 1;
+    }
+    return count;
+}
+
 #pragma region Threading
 
 struct Thread
@@ -173,6 +183,8 @@ static bool is_thread_alive(Thread *thread)
     U32 exit_code;
     if (GetExitCodeThread(thread->win_handle, (unsigned long *)&exit_code))
     {
+        fprintf(stderr, "ERROR: GetExitCodeThread failed with %ld\n", GetLastError());
+        exit(1);
         TODO("handle failed to check if thread is alive");
     }
 
@@ -217,12 +229,14 @@ static void suspend_thread(Thread *thread)
 
 static Thread get_current_thread()
 {   
-    HANDLE win_handle = GetCurrentThread();
+    U32 thread_id = GetCurrentThreadId();
+    HANDLE win_handle = OpenThread(THREAD_ALL_ACCESS, false, thread_id);
+    // DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), nullptr, &win_handle, 0, false, DUPLICATE_SAME_ACCESS);
 
     Thread thread = {
         .initalized = true,
         .suspended = false,
-        .id = GetThreadId(win_handle),
+        .id = thread_id,
         .win_handle = win_handle,
     };
     return thread;
@@ -264,7 +278,6 @@ enum Settings
     MAX_MESSAGE_LEN = MAX_DATA_LEN - MAX_NAME_LEN - 1, // -1 for separator
 };
 
-//TODO(Johan): was last here
 
 struct PublicMessage
 {
@@ -276,8 +289,15 @@ struct PublicMessage
 struct ServerBroadcast
 {
     DataFormat format = SERVER_BROADCAST;
-    char name[MAX_NAME_LEN]
-    char data[MAX_MESSAGE_LEN];
+    char name[MAX_NAME_LEN];
+    char message[MAX_MESSAGE_LEN];
+};
+
+
+static void assert_struct_sizes()
+{
+    assert(sizeof(PublicMessage) <= RECEIVE_BUF_LEN);
+    assert(sizeof(ServerBroadcast) <= RECEIVE_BUF_LEN);
 }
 
 
@@ -300,8 +320,9 @@ struct MessageThreadData
 
 static MessageThreadData g_message_thread_data = {};
 
-static unsigned long client_sender(void *)
+static unsigned long client_sender(void *p)
 {
+    SOCKET socket = *(SOCKET *)p;
     while (true)
     {
         // if not nullptr something is at the start of the stack
@@ -310,12 +331,21 @@ static unsigned long client_sender(void *)
         {
             //TODO(Johan): maybe change message queue from stack to FIFO
             resume_thread(g_message_thread_data.thread_queue[g_message_thread_data.queue_count - 1]);
-            g_message_thread_data.thread_queue[g_message_thread_data.queue_count] = nullptr;
+            g_message_thread_data.thread_queue[g_message_thread_data.queue_count - 1] = nullptr;
             InterlockedDecrement64((volatile LONG64 *)&g_message_thread_data.queue_count);
 
             // wait on sender thread to copy data to send buffer
             while (g_message_thread_data.send_lock)
             {}
+
+            I32 flags = 0;
+            I32 bytes_sent = send(socket, g_message_thread_data.message_buffer, SEND_BUF_LEN, flags);
+            if (bytes_sent == SOCKET_ERROR)
+            {
+                TODO("handle failed to send bytes");
+            }
+            printf("sent %d bytes\n", bytes_sent);
+
 
             memset(g_message_thread_data.message_buffer, 0, sizeof(g_message_thread_data.message_buffer));
             g_message_thread_data.send_lock = true;
@@ -335,7 +365,7 @@ static void push_on_client_thread_queue_and_suspend(Thread *thread, U64 queue_po
     suspend_thread(thread);
 }
 
-static void send_data(Thread *self, const char *byte_buffer, Usize buf_size)
+static void send_data(char *byte_buffer, Usize buf_size)
 {
     if (buf_size > sizeof(g_message_thread_data.message_buffer))
     {
@@ -343,8 +373,9 @@ static void send_data(Thread *self, const char *byte_buffer, Usize buf_size)
     }
 
     {
-        U64 queue_pos = (U64)InterlockedIncrement64((volatile LONG64 *)&g_message_thread_data.send_lock) - 1;
-        push_on_client_thread_queue_and_suspend(self, queue_pos);
+        Thread self = get_current_thread();
+        U64 queue_pos = (U64)InterlockedIncrement64((volatile LONG64 *)&g_message_thread_data.queue_count) - 1;
+        push_on_client_thread_queue_and_suspend(&self, queue_pos);
     }
 
 
@@ -352,26 +383,59 @@ static void send_data(Thread *self, const char *byte_buffer, Usize buf_size)
     g_message_thread_data.send_lock = false;
 }
 
-static void send_message(Thread *self, const char *name, const char *message)
+static void send_message(const char *message)
 {
-    Usize name_len = str_len(name);
-    Usize message_len = str_len(message);
-    if (name_len + 1 + message_len > sizeof(g_message_thread_data.message_buffer))
-    {
-        TODO("handle message is too long");
-    }
+    Usize message_len = str_nlen(message, MAX_MESSAGE_LEN);
 
+    PublicMessage sb = {
+        .format = PUBLIC_MESSAGE,
+        .message = {},
+    };
 
-    char buffer[SEND_BUF_LEN] = {};
-
-    memcpy(buffer, name, sizeof(*name) * name_len);
-    buffer[name_len] = ':';
-    memcpy(buffer + name_len + 1, message, sizeof(*name) * message_len);
-
-    send_data(self, buffer, sizeof(char) * (name_len + 1 + message_len));
-
+    memcpy(&sb.message, message, message_len);
+    send_data((char *)&sb, sizeof(sb));
 }
 
+
+
+static void receive_data_client(char *raw_data)
+{
+    DataFormat *format = (DataFormat *)raw_data;
+    switch (*format)
+    {
+        case DataFormat::INVALID:
+        {
+            TODO("handle client receiving");
+        } return;
+
+        case DataFormat::PUBLIC_MESSAGE:
+        {
+            TODO("handle client receiving");
+        } return;
+
+        case DataFormat::PRIVATE_MESSAGE:
+        {
+            TODO("handle client receiving");
+        } return;
+
+        case DataFormat::NAME_CHANGE:
+        {
+            TODO("handle client receiving");
+        } return;
+
+        case DataFormat::COMMAND:
+        {
+            TODO("handle client receiving");
+
+        } return;
+        case DataFormat::SERVER_BROADCAST:
+        {
+            ServerBroadcast *sb = (ServerBroadcast *)raw_data;
+            printf("%.*s : %.*s\n", MAX_NAME_LEN, sb->name, MAX_MESSAGE_LEN, sb->message);
+        } return;
+
+    }
+}
 
 struct ReceiverParams
 {
@@ -394,16 +458,16 @@ static unsigned long receiver(void *param)
         }
         printf("received %d bytes\n", bytes_received);
 
-        
-
-        printf("%s\n", p->receive_buffer);
-
-
+       receive_data_client(p->receive_buffer); 
     }
     return 0;
 }
 
-static void client(const char *name_buffer)
+
+
+
+
+static void client(const char *name)
 {
     SOCKET connect_socket;
     {
@@ -433,7 +497,7 @@ static void client(const char *name_buffer)
 
         Thread send_thread = {};
         {
-            send_thread = spawn_thread(client_sender, false, nullptr);
+            send_thread = spawn_thread(client_sender, false, &connect_socket);
         }
 
         Thread receive_thread = {};
@@ -449,7 +513,6 @@ static void client(const char *name_buffer)
         }
 
 
-        Thread self = get_current_thread();
         {
             char command_buffer[MAX_COMMAND_LEN + 1]; // + 1 for null termination
             
@@ -480,7 +543,7 @@ static void client(const char *name_buffer)
                 }
                 else
                 {
-                    send_message(&self, name_buffer, command_buffer);
+                    send_message(command_buffer);
                 }
             }
         }
@@ -508,18 +571,12 @@ struct Client
 {
     bool active = false;
     volatile bool receive_lock = true;
-    char receive_buf[SERVER_RECEIVE_BUF_LEN];
     Thread thread;
     SOCKET socket;
+    char name[MAX_NAME_LEN];
+    char receive_buf[SERVER_RECEIVE_BUF_LEN];
 };
 
-struct ClientToServerReceiverParams
-{
-    Thread *self;
-    SOCKET client_socket;
-    char *receive_buffer;
-    I32 receive_len;
-};
 
 static volatile Usize g_connection_count = 0;
 static Client g_client_pool[MAX_ACTIVE_THREADS] = {};
@@ -541,7 +598,7 @@ static unsigned long server_sender(void *)
         {
             //TODO(Johan): maybe change message queue from stack to FIFO
             resume_thread(g_server_message_thread_queue[g_server_data_queue_count - 1]);
-            g_server_message_thread_queue[g_server_data_queue_count] = nullptr;
+            g_server_message_thread_queue[g_server_data_queue_count - 1] = nullptr;
             InterlockedDecrement64((volatile LONG64 *)&g_server_data_queue_count);
 
             // wait on broadcasting thread to copy data to send buffer
@@ -552,9 +609,8 @@ static unsigned long server_sender(void *)
             {
                 if (g_client_pool[i].active)
                 {
-                    I32 send_len = (I32)str_len(g_server_data_buffer) + 1;
                     I32 flags = 0;
-                    I32 bytes_sent = send(g_client_pool[i].socket, g_server_data_buffer, send_len, flags);
+                    I32 bytes_sent = send(g_client_pool[i].socket, g_server_data_buffer, SEND_BUF_LEN, flags);
                     if (bytes_sent == SOCKET_ERROR)
                     {
                         TODO("handle failed to send bytes");
@@ -581,82 +637,89 @@ static void push_on_server_thread_queue_and_suspend(Thread *thread, U64 queue_po
     suspend_thread(thread);
 }
 
-
-static void broadcast_message_to_all_clients(const char *name, const char *message, Thread *self)
+static void broadcast_message_to_all_clients(const char *name, const char *message)
 {
-    Usize name_len = str_len(name);
-    Usize message_len = str_len(message);
-    if (name_len + message_len >= ARRAY_COUNT(g_server_data_buffer))
     {
-        TODO("handle message is too long");
-    }
-
-    {
+        Thread self = get_current_thread();
         U64 queue_pos = (U64)InterlockedIncrement64((volatile LONG64 *)&g_server_data_queue_count) - 1;
-        push_on_server_thread_queue_and_suspend(self, queue_pos);
+        push_on_server_thread_queue_and_suspend(&self, queue_pos);
     }
 
-    memcpy(g_server_data_buffer, name, sizeof(char) * name_len); // - 1 to remove null termination char
-    g_server_data_buffer[name_len] = ':';
-    memcpy(g_server_data_buffer + name_len + 1, message, sizeof(char) * message_len);
-    g_server_data_buffer[name_len + message_len + 1] = '\0';
-    printf("%s: %s\n", name, message);
+    Usize name_len = str_nlen(name, MAX_NAME_LEN);
+    Usize message_len = str_nlen(message, MAX_MESSAGE_LEN);
+
+
+    ServerBroadcast sb = {
+        .format = SERVER_BROADCAST,
+        .name = {},
+        .message = {},
+    };
+
+    memcpy(sb.name, name, sizeof(char) * name_len);
+    memcpy(sb.message, message, sizeof(char) * message_len);
+    memcpy(g_server_data_buffer, &sb, sizeof(sb));
+    printf("%.*s : %.*s\n", MAX_NAME_LEN, sb.name, MAX_MESSAGE_LEN, sb.message);
     g_server_data_send_lock = false;
 }
 
-static void receive_data_server(char *raw_data, Usize data_len)
+static void receive_data_server(Client *client)
 {
+    char *raw_data = client->receive_buf;
     DataFormat *format = (DataFormat *)raw_data;
     switch (*format)
     {
         case DataFormat::INVALID:
         {
             TODO("handle invalid data");
-        } break;
+        } return;
 
         case DataFormat::PUBLIC_MESSAGE:
         {
             PublicMessage *message = (PublicMessage *)raw_data;
-            broadcast_message_to_all_clients()
+            broadcast_message_to_all_clients(client->name, message->message);
 
-        } break;
+        } return;
 
         case DataFormat::PRIVATE_MESSAGE:
         {
-
-        } break;
+            TODO("handle private message");
+        } return;
 
         case DataFormat::NAME_CHANGE:
         {
-
-        } break;
+            TODO("handle name change");
+        } return;
 
         case DataFormat::COMMAND:
         {
+            TODO("handle command");
 
-        } break;
+        } return;
+        case DataFormat::SERVER_BROADCAST:
+        {
+            TODO("handle server receiving server broadcast somehow");
+        } return;
 
     }
 }
 
 static unsigned long client_to_server_receiver(void *param)
 {
-   ClientToServerReceiverParams *p = (ClientToServerReceiverParams *)param; 
+    Client *client = (Client *)param; 
     while (true)
     {
         I32 flags = 0;
-        I32 bytes_received = recv(p->client_socket, p->receive_buffer, p->receive_len, flags);
+        I32 bytes_received = recv(client->socket, client->receive_buf, RECEIVE_BUF_LEN, flags);
         if (bytes_received == SOCKET_ERROR)
         {
             TODO("handle error receiving message from client");
         }
+        printf("received %d bytes from %.*s\n", bytes_received, MAX_NAME_LEN, client->name);
 
-        TODO("fix");
+        //TODO(Johan): might be a data race when receiving data from a client twice before processing the first data.
 
-        //TODO(Johan): fix 
-        // const char *name = p->receive_buffer;
-        // const char *message = &p->receive_buffer[NAME_LEN]; 
-        // broadcast_message_to_all_clients(name, message, p->self);
+        receive_data_server(client);
+
     }
     return 0;
 }
@@ -665,13 +728,12 @@ static unsigned long client_to_server_receiver(void *param)
 
 struct AcceptConnectionsParams
 {
-    Thread *self;
     SOCKET server_socket;
 };
 
-static unsigned long accept_connections(void *param)
+static unsigned long accept_connections(void *p)
 {
-    AcceptConnectionsParams *p = (AcceptConnectionsParams *)param;
+    SOCKET socket = *(SOCKET *)p;
     while (true)
     {
         struct sockaddr_in socket_addr = {};
@@ -679,7 +741,7 @@ static unsigned long accept_connections(void *param)
         I32 addr_len = sizeof(socket_addr);
         if (g_connection_count < MAX_ACTIVE_THREADS)
         {
-            SOCKET tmp_socket = accept(p->server_socket, (struct sockaddr *)&socket_addr, &addr_len);
+            SOCKET tmp_socket = accept(socket, (struct sockaddr *)&socket_addr, &addr_len);
             if (tmp_socket == INVALID_SOCKET)
             {
                 fprintf(stderr, "failed to accept connection with, %d \n", WSAGetLastError());
@@ -695,27 +757,36 @@ static unsigned long accept_connections(void *param)
                 {
                     if (!g_client_pool[i].active)
                     {
-                        g_connection_count += 1;
-                        g_client_pool[i].receive_lock = true; 
-                        g_client_pool[i].socket = tmp_socket;
-                        g_client_pool[i].active = true;
-
-                        {
-                            ClientToServerReceiverParams ctsrp = {
-                                .self = &g_client_pool[i].thread,
-                                .client_socket = g_client_pool->socket,
-                                .receive_buffer = g_client_pool->receive_buf,
-                                .receive_len = ARRAY_COUNT(g_client_pool->receive_buf), 
-                            };
-
-                            g_client_pool[i].thread = spawn_thread(client_to_server_receiver, false, (void *)&ctsrp);
-                        }
                         break;
                     }
                 }
+                    g_connection_count += 1;
+                    g_client_pool[i].receive_lock = true; 
+                    g_client_pool[i].socket = tmp_socket;
+                    g_client_pool[i].active = true;
+                    
+                    snprintf(g_client_pool[i].name, MAX_NAME_LEN, "%d.%d.%d.%d", 
+                        socket_addr.sin_addr.S_un.S_un_b.s_b1, 
+                        socket_addr.sin_addr.S_un.S_un_b.s_b2, 
+                        socket_addr.sin_addr.S_un.S_un_b.s_b3, 
+                        socket_addr.sin_addr.S_un.S_un_b.s_b4);
+
+
+                    g_client_pool[i].thread = spawn_thread(client_to_server_receiver, false, &g_client_pool[i]);
+
                 assert(i != ARRAY_COUNT(g_client_pool) - 1); // max client amount reached
             }
-            broadcast_message_to_all_clients("Server", "Someone connected", p->self);
+
+            char ip_buf[30] = {};
+
+            snprintf(ip_buf, sizeof(ip_buf), "%d.%d.%d.%d has connected", 
+                socket_addr.sin_addr.S_un.S_un_b.s_b1, 
+                socket_addr.sin_addr.S_un.S_un_b.s_b2, 
+                socket_addr.sin_addr.S_un.S_un_b.s_b3, 
+                socket_addr.sin_addr.S_un.S_un_b.s_b4);
+                
+
+            broadcast_message_to_all_clients("Server", ip_buf);
         }
     }
     return 0;
@@ -752,26 +823,15 @@ static void server()
         }
     }
 
-    {
-        Thread sender_thread = {};
-        {
-            sender_thread = spawn_thread(server_sender, false, nullptr);
-        }
+    Thread sender_thread = spawn_thread(server_sender, false, nullptr);
+    Thread connection_thread =  spawn_thread(accept_connections, false, (void *)&server_socket);
 
 
-        Thread connection_thread = {};
-        {
-            AcceptConnectionsParams acp = {
-                .self = &connection_thread,
-                .server_socket = server_socket,
-            };
+    join_thread(&sender_thread);
+    join_thread(&connection_thread);
 
-            connection_thread =  spawn_thread(accept_connections, false, (void *)&acp);
-        }
-    }
-
-    while (true)
-    {}
+    kill_thread(&sender_thread);
+    kill_thread(&connection_thread);
 }
 
 #pragma endregion
@@ -780,6 +840,7 @@ static char g_name_buffer[MAX_NAME_LEN + 1] = {}; // + 1 for null termination
 
 int main (int argc, char *argv[])
 {
+    assert_struct_sizes();
     const char *program = argv[0]; (void)program;
 
     // initalize config
