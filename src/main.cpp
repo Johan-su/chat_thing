@@ -146,7 +146,7 @@ static Usize str_nlen(const char *str, Usize max)
 struct Thread
 {
     bool initalized = false;
-    bool suspended = false;
+    volatile I16 running = 1;
     U32 id;
     HANDLE win_handle;
 };
@@ -181,7 +181,7 @@ static bool is_thread_alive(Thread *thread)
         return false;
 
     U32 exit_code;
-    if (GetExitCodeThread(thread->win_handle, (unsigned long *)&exit_code))
+    if (!GetExitCodeThread(thread->win_handle, (unsigned long *)&exit_code))
     {
         fprintf(stderr, "ERROR: GetExitCodeThread failed with %ld\n", GetLastError());
         exit(1);
@@ -211,18 +211,18 @@ static void kill_thread(Thread *thread)
 
 static void resume_thread(Thread *thread)
 {
-    if (thread->suspended)
+    I16 val = InterlockedIncrement16((volatile SHORT *)&thread->running);
+    if (val == 1)
     {
         ResumeThread(thread->win_handle);
-        thread->suspended = false;
     }
 }
 
 static void suspend_thread(Thread *thread)
 {
-    if (!thread->suspended)
+    I16 val = InterlockedDecrement16((volatile SHORT *)&thread->running);
+    if (val == 0)
     {
-        thread->suspended = true;
         SuspendThread(thread->win_handle);
     }
 }
@@ -235,7 +235,7 @@ static Thread get_current_thread()
 
     Thread thread = {
         .initalized = true,
-        .suspended = false,
+        .running = true,
         .id = thread_id,
         .win_handle = win_handle,
     };
@@ -331,7 +331,7 @@ static unsigned long client_sender(void *p)
         {
             //TODO(Johan): maybe change message queue from stack to FIFO
             resume_thread(g_message_thread_data.thread_queue[g_message_thread_data.queue_count - 1]);
-            g_message_thread_data.thread_queue[g_message_thread_data.queue_count - 1] = nullptr;
+            // g_message_thread_data.thread_queue[g_message_thread_data.queue_count - 1] = nullptr; //TODO(Johan): comment back in
             InterlockedDecrement64((volatile LONG64 *)&g_message_thread_data.queue_count);
 
             // wait on sender thread to copy data to send buffer
@@ -793,6 +793,7 @@ static unsigned long accept_connections(void *p)
 }
 
 
+
 static void server()
 {
     SOCKET server_socket;
@@ -829,9 +830,6 @@ static void server()
 
     join_thread(&sender_thread);
     join_thread(&connection_thread);
-
-    kill_thread(&sender_thread);
-    kill_thread(&connection_thread);
 }
 
 #pragma endregion
