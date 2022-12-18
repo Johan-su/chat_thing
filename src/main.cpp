@@ -146,7 +146,7 @@ static Usize str_nlen(const char *str, Usize max)
 struct Thread
 {
     bool initalized = false;
-    volatile I16 running = 1;
+    bool running = false;
     U32 id;
     HANDLE win_handle;
 };
@@ -211,8 +211,7 @@ static void kill_thread(Thread *thread)
 
 static void resume_thread(Thread *thread)
 {
-    I16 val = InterlockedIncrement16((volatile SHORT *)&thread->running);
-    if (val == 1)
+    if (!thread->running)
     {
         ResumeThread(thread->win_handle);
     }
@@ -220,8 +219,7 @@ static void resume_thread(Thread *thread)
 
 static void suspend_thread(Thread *thread)
 {
-    I16 val = InterlockedDecrement16((volatile SHORT *)&thread->running);
-    if (val == 0)
+    if (thread->running)
     {
         SuspendThread(thread->win_handle);
     }
@@ -241,6 +239,78 @@ static Thread get_current_thread()
     };
     return thread;
 }
+
+
+struct Mutex
+{
+    HANDLE win_handle;
+};
+
+static Mutex create_mutex()
+{
+    Mutex mutex = {};
+
+    {
+        HANDLE temp_handle = CreateMutexExA(nullptr, nullptr, 0, SYNCHRONIZE);
+        if (temp_handle == nullptr)
+        {
+            TODO("handle error failed to create mutex");
+        }
+        mutex.win_handle = temp_handle;
+    }
+    return mutex;
+}
+
+static void clean_mutex(Mutex *mutex)
+{
+    CloseHandle(mutex->win_handle);
+}
+
+static void lock_mutex(Mutex *mutex)
+{
+    WaitForSingleObjectEx(mutex->win_handle, INFINITE, false);
+}
+
+static void release_mutex(Mutex *mutex)
+{
+    ReleaseMutex(mutex->win_handle);
+}
+
+
+struct Semaphore
+{
+    HANDLE win_handle;
+};
+
+static Semaphore create_semaphore(I32 inital_count, I32 max_count)
+{
+    Semaphore semaphore = {};
+    {
+        HANDLE temp_handle = CreateSemaphoreExA(nullptr, inital_count, max_count, nullptr, 0, SEMAPHORE_ALL_ACCESS);
+        if (temp_handle == nullptr)
+        {
+            TODO("handle error failed to create semaphore");
+        }
+        semaphore.win_handle = temp_handle;
+    }
+    return semaphore;
+};
+
+static void clean_semaphore(Semaphore *semaphore)
+{
+    CloseHandle(semaphore->win_handle);
+}
+
+static void wait_semaphore(Semaphore *semaphore)
+{
+    WaitForSingleObjectEx(semaphore->win_handle, INFINITE, false);
+}
+
+static void release_semaphore(Semaphore *semaphore)
+{
+    ReleaseSemaphore(semaphore->win_handle, 1, nullptr);
+}
+
 
 #pragma endregion
 
@@ -267,6 +337,12 @@ enum DataFormat
     SERVER_BROADCAST,
 };
 
+enum CommandType
+{
+    INVALID_COMMAND,
+    QUIT_SEVER,
+    ABORT_QUITTING_SERVER,
+};
 
 enum Settings
 {
@@ -276,6 +352,8 @@ enum Settings
     MAX_DATA_LEN = RECEIVE_BUF_LEN - DATA_HEADER_LEN,
     MAX_NAME_LEN = 32,
     MAX_MESSAGE_LEN = MAX_DATA_LEN - MAX_NAME_LEN - 1, // -1 for separator
+    COMMAND_HEADER_LEN = DATA_HEADER_LEN + sizeof(CommandType),
+    MAX_COMMAND_LEN = RECEIVE_BUF_LEN - COMMAND_HEADER_LEN,
 };
 
 
@@ -285,6 +363,14 @@ struct PublicMessage
     char message[MAX_MESSAGE_LEN];
 };
 
+
+
+struct Command
+{
+    DataFormat format = COMMAND;
+    CommandType command_type = INVALID_COMMAND;
+    char data[MAX_COMMAND_LEN];
+};
 
 struct ServerBroadcast
 {
@@ -297,6 +383,7 @@ struct ServerBroadcast
 static void assert_struct_sizes()
 {
     assert(sizeof(PublicMessage) <= RECEIVE_BUF_LEN);
+    assert(sizeof(Command) <= RECEIVE_BUF_LEN);
     assert(sizeof(ServerBroadcast) <= RECEIVE_BUF_LEN);
 }
 
@@ -305,82 +392,62 @@ static void assert_struct_sizes()
 
 enum ClientSettings
 {
-    MAX_COMMAND_LEN = MAX_DATA_LEN,
     MAX_ACTIVE_CLIENT_THREADS = 5,
 };
 
-struct MessageThreadData
-{
-    volatile U64 queue_count = 0;
-    volatile bool send_lock = true;
-    Thread *thread_queue[MAX_ACTIVE_CLIENT_THREADS] = {};
-    char message_buffer[SEND_BUF_LEN] = {};
 
-};
+static volatile bool g_client_send_lock = true;
+static Semaphore g_client_sending_semaphore = {};
+static Mutex g_client_sending_mutex = {};
+static char g_client_message_buffer[SEND_BUF_LEN] = {};
 
-static MessageThreadData g_message_thread_data = {};
+static volatile bool g_client_active = false;
 
 static unsigned long client_sender(void *p)
 {
     SOCKET socket = *(SOCKET *)p;
     while (true)
     {
-        // if not nullptr something is at the start of the stack
-        if (g_message_thread_data.queue_count != 0 &&
-            g_message_thread_data.thread_queue[g_message_thread_data.queue_count - 1] != nullptr)
+        // wait on sender thread to copy data to send buffer
+        wait_semaphore(&g_client_sending_semaphore);
+        if (!g_client_active)
         {
-            //TODO(Johan): maybe change message queue from stack to FIFO
-            resume_thread(g_message_thread_data.thread_queue[g_message_thread_data.queue_count - 1]);
-            // g_message_thread_data.thread_queue[g_message_thread_data.queue_count - 1] = nullptr; //TODO(Johan): comment back in
-            InterlockedDecrement64((volatile LONG64 *)&g_message_thread_data.queue_count);
-
-            // wait on sender thread to copy data to send buffer
-            while (g_message_thread_data.send_lock)
-            {}
-
-            I32 flags = 0;
-            I32 bytes_sent = send(socket, g_message_thread_data.message_buffer, SEND_BUF_LEN, flags);
-            if (bytes_sent == SOCKET_ERROR)
-            {
-                TODO("handle failed to send bytes");
-            }
-            printf("sent %d bytes\n", bytes_sent);
-
-
-            memset(g_message_thread_data.message_buffer, 0, sizeof(g_message_thread_data.message_buffer));
-            g_message_thread_data.send_lock = true;
+            return 0;
         }
+
+        I32 flags = 0;
+        I32 bytes_sent = send(socket, g_client_message_buffer, SEND_BUF_LEN, flags);
+        if (bytes_sent == SOCKET_ERROR)
+        {
+            TODO("handle failed to send bytes");
+        }
+        printf("sent %d bytes\n", bytes_sent);
+
+
+        memset(g_client_message_buffer, 0, sizeof(g_client_message_buffer));
+        g_client_send_lock = true;
     }
     return 0;
 }
 
-static void push_on_client_thread_queue_and_suspend(Thread *thread, U64 queue_pos)
-{
-    if (queue_pos >= ARRAY_COUNT(g_message_thread_data.thread_queue))
-    {
-        TODO("Handle error max threads in server message queue");
-    }
-
-    g_message_thread_data.thread_queue[queue_pos] = thread;
-    suspend_thread(thread);
-}
 
 static void send_data(char *byte_buffer, Usize buf_size)
 {
-    if (buf_size > sizeof(g_message_thread_data.message_buffer))
+    if (buf_size > sizeof(g_client_message_buffer))
     {
         TODO("handle data is too big");
     }
 
-    {
-        Thread self = get_current_thread();
-        U64 queue_pos = (U64)InterlockedIncrement64((volatile LONG64 *)&g_message_thread_data.queue_count) - 1;
-        push_on_client_thread_queue_and_suspend(&self, queue_pos);
-    }
+    lock_mutex(&g_client_sending_mutex);
 
+    memcpy(g_client_message_buffer, byte_buffer, buf_size);
+    g_client_send_lock = false;
+    release_semaphore(&g_client_sending_semaphore);
 
-    memcpy(g_message_thread_data.message_buffer, byte_buffer, buf_size);
-    g_message_thread_data.send_lock = false;
+    while (g_client_send_lock == false)
+    {}
+
+    release_mutex(&g_client_sending_mutex);
 }
 
 static void send_message(const char *message)
@@ -439,7 +506,6 @@ static void receive_data_client(char *raw_data)
 
 struct ReceiverParams
 {
-    Thread *self;
     SOCKET socket;
     char *receive_buffer;
     I32 receive_len;
@@ -448,28 +514,57 @@ struct ReceiverParams
 static unsigned long receiver(void *param)
 {
     ReceiverParams *p = (ReceiverParams *)param; 
-    while (true)
+    while (g_client_active)
     {
         I32 flags = 0;
         I32 bytes_received = recv(p->socket, p->receive_buffer, p->receive_len, flags);
         if (bytes_received == SOCKET_ERROR)
         {
-            TODO("handle error receiving message from server");
+            I32 error_code = WSAGetLastError();
+            switch (error_code)
+            {
+                case WSAESHUTDOWN:
+                {
+                    if (g_client_active)
+                    {
+                        TODO("handle error client active, but WSA is shutdown");
+                    }
+                } break;
+
+                case WSAECONNRESET:
+                {
+                    printf("Lost connection to server, server severed connection\n");
+                    g_client_active = false;
+                    return 0;
+                } break;
+                
+                default:
+                {
+                    printf("%d\n", error_code);
+                    TODO("handle error receiving message from server");
+                } break;
+            }
         }
         printf("received %d bytes\n", bytes_received);
+        if (bytes_received == 0)
+        {
+            return 0;
+        }
 
-       receive_data_client(p->receive_buffer); 
+        receive_data_client(p->receive_buffer); 
     }
     return 0;
 }
 
 
-
-
-
 static void client(const char *name)
 {
+    g_client_active = true;
+    g_client_sending_semaphore = create_semaphore(0, 1);
+    g_client_sending_mutex = create_mutex();
+
     SOCKET connect_socket;
+    // initalize socket
     {
         connect_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (connect_socket == INVALID_SOCKET)
@@ -495,28 +590,20 @@ static void client(const char *name)
     {
         char receive_buf[RECEIVE_BUF_LEN];
 
-        Thread send_thread = {};
-        {
-            send_thread = spawn_thread(client_sender, false, &connect_socket);
-        }
+        Thread send_thread = spawn_thread(client_sender, false, &connect_socket);
 
-        Thread receive_thread = {};
-        {
-            ReceiverParams rparams = {
-                .self = &receive_thread,
-                .socket = connect_socket,
-                .receive_buffer = receive_buf,
-                .receive_len = ARRAY_COUNT(receive_buf),
-            };
+        ReceiverParams rparams = {
+            .socket = connect_socket,
+            .receive_buffer = receive_buf,
+            .receive_len = ARRAY_COUNT(receive_buf),
+        };
 
-            receive_thread = spawn_thread(receiver, false, &rparams);
-        }
-
+        Thread receive_thread = spawn_thread(receiver, false, &rparams);
 
         {
             char command_buffer[MAX_COMMAND_LEN + 1]; // + 1 for null termination
             
-            while (true)
+            while (g_client_active)
             {
                 memset(command_buffer, 0, sizeof(command_buffer));
                 {
@@ -530,7 +617,7 @@ static void client(const char *name)
                 {
                     if (is_str(&command_buffer[1], "q"))
                     {
-                        break;
+                        g_client_active = false;
                     }
                     else if (false)
                     {
@@ -548,11 +635,19 @@ static void client(const char *name)
             }
         }
 
-        kill_thread(&send_thread);
-        kill_thread(&receive_thread);
+        // gracefully exit client
+        {
+            shutdown(connect_socket, 2); // SD_BOTH
 
-        join_thread(&send_thread);
-        join_thread(&receive_thread);
+            release_semaphore(&g_client_sending_semaphore);
+
+            join_thread(&send_thread);
+            join_thread(&receive_thread);
+
+            clean_mutex(&g_client_sending_mutex);
+            clean_semaphore(&g_client_sending_semaphore);
+
+        }
     }
 }
 
@@ -581,69 +676,49 @@ struct Client
 static volatile Usize g_connection_count = 0;
 static Client g_client_pool[MAX_ACTIVE_THREADS] = {};
 
-static volatile U64 g_server_data_queue_count = 0;
 static volatile bool g_server_data_send_lock = true;
 static char g_server_data_buffer[SERVER_SEND_BUF_LEN] = {};
 
-// + 10 to account for main thread and other non-client threads
-static Thread *g_server_message_thread_queue[MAX_ACTIVE_THREADS + 10] = {};
+static Mutex g_server_sending_mutex = {};
+static Semaphore g_server_sending_semaphore = {};
+
+static volatile bool g_server_active = false;
+
 
 static unsigned long server_sender(void *)
 {
     while (true)
     {
-        // if not nullptr something is at the start of the stack
-        if (g_server_data_queue_count != 0 && 
-            g_server_message_thread_queue[g_server_data_queue_count - 1] != nullptr)
+        // wait on broadcasting thread to copy data to send buffer
+        wait_semaphore(&g_server_sending_semaphore);
+        if (!g_server_active)
         {
-            //TODO(Johan): maybe change message queue from stack to FIFO
-            resume_thread(g_server_message_thread_queue[g_server_data_queue_count - 1]);
-            g_server_message_thread_queue[g_server_data_queue_count - 1] = nullptr;
-            InterlockedDecrement64((volatile LONG64 *)&g_server_data_queue_count);
-
-            // wait on broadcasting thread to copy data to send buffer
-            while (g_server_data_send_lock)
-            {}
-
-            for (Usize i = 0; i < ARRAY_COUNT(g_client_pool); ++i)
-            {
-                if (g_client_pool[i].active)
-                {
-                    I32 flags = 0;
-                    I32 bytes_sent = send(g_client_pool[i].socket, g_server_data_buffer, SEND_BUF_LEN, flags);
-                    if (bytes_sent == SOCKET_ERROR)
-                    {
-                        TODO("handle failed to send bytes");
-                    }
-                    printf("sent %d bytes\n", bytes_sent);
-                }
-            }
-            memset(g_server_data_buffer, 0, sizeof(g_server_data_buffer));
-            g_server_data_send_lock = true;
+            break;
         }
+
+        for (Usize i = 0; i < ARRAY_COUNT(g_client_pool); ++i)
+        {
+            if (g_client_pool[i].active)
+            {
+                I32 flags = 0;
+                I32 bytes_sent = send(g_client_pool[i].socket, g_server_data_buffer, SEND_BUF_LEN, flags);
+                if (bytes_sent == SOCKET_ERROR)
+                {
+                    TODO("handle failed to send bytes");
+                }
+                printf("sent %d bytes\n", bytes_sent);
+            }
+        }
+        memset(g_server_data_buffer, 0, sizeof(g_server_data_buffer));
+            g_server_data_send_lock = true;
     }
     return 0;
 }
 
 
-static void push_on_server_thread_queue_and_suspend(Thread *thread, U64 queue_pos)
-{
-    if (queue_pos >= ARRAY_COUNT(g_server_message_thread_queue))
-    {
-        TODO("Handle error max threads in server message queue");
-    }
-
-    g_server_message_thread_queue[queue_pos] = thread;
-    suspend_thread(thread);
-}
-
 static void broadcast_message_to_all_clients(const char *name, const char *message)
 {
-    {
-        Thread self = get_current_thread();
-        U64 queue_pos = (U64)InterlockedIncrement64((volatile LONG64 *)&g_server_data_queue_count) - 1;
-        push_on_server_thread_queue_and_suspend(&self, queue_pos);
-    }
+    lock_mutex(&g_server_sending_mutex);
 
     Usize name_len = str_nlen(name, MAX_NAME_LEN);
     Usize message_len = str_nlen(message, MAX_MESSAGE_LEN);
@@ -660,6 +735,12 @@ static void broadcast_message_to_all_clients(const char *name, const char *messa
     memcpy(g_server_data_buffer, &sb, sizeof(sb));
     printf("%.*s : %.*s\n", MAX_NAME_LEN, sb.name, MAX_MESSAGE_LEN, sb.message);
     g_server_data_send_lock = false;
+    release_semaphore(&g_server_sending_semaphore);
+
+    while (g_server_data_send_lock == false)
+    {}
+
+    release_mutex(&g_server_sending_mutex);
 }
 
 static void receive_data_server(Client *client)
@@ -706,7 +787,7 @@ static void receive_data_server(Client *client)
 static unsigned long client_to_server_receiver(void *param)
 {
     Client *client = (Client *)param; 
-    while (true)
+    while (g_server_active)
     {
         I32 flags = 0;
         I32 bytes_received = recv(client->socket, client->receive_buf, RECEIVE_BUF_LEN, flags);
@@ -715,15 +796,24 @@ static unsigned long client_to_server_receiver(void *param)
             TODO("handle error receiving message from client");
         }
         printf("received %d bytes from %.*s\n", bytes_received, MAX_NAME_LEN, client->name);
-
-        //TODO(Johan): might be a data race when receiving data from a client twice before processing the first data.
+        
+        if (bytes_received == 0)
+        {
+            client->active = false;
+            closesocket(client->socket);
+            {
+                char message_buffer[MAX_NAME_LEN + 14 + 1];
+                snprintf(message_buffer, sizeof(message_buffer), "%s disconnected\n", client->name);
+                broadcast_message_to_all_clients("Server", message_buffer);   
+            }
+            memset(client, 0, sizeof(Client));
+            return 0;
+        }
 
         receive_data_server(client);
-
     }
     return 0;
 }
-
 
 
 struct AcceptConnectionsParams
@@ -734,7 +824,7 @@ struct AcceptConnectionsParams
 static unsigned long accept_connections(void *p)
 {
     SOCKET socket = *(SOCKET *)p;
-    while (true)
+    while (g_server_active)
     {
         struct sockaddr_in socket_addr = {};
         socket_addr.sin_family = AF_INET;
@@ -796,6 +886,10 @@ static unsigned long accept_connections(void *p)
 
 static void server()
 {
+    g_server_active = true;
+    g_server_sending_semaphore = create_semaphore(0, 1);
+    g_server_sending_mutex = create_mutex();
+
     SOCKET server_socket;
     {
         server_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -825,18 +919,29 @@ static void server()
     }
 
     Thread sender_thread = spawn_thread(server_sender, false, nullptr);
-    Thread connection_thread =  spawn_thread(accept_connections, false, (void *)&server_socket);
 
+    // main thread accepts connections
+    accept_connections((void *)&server_socket);
 
-    join_thread(&sender_thread);
-    join_thread(&connection_thread);
+    // gracefully exit server
+    {
+        shutdown(server_socket, 2); // SD_Both
+
+        release_semaphore(&g_server_sending_semaphore);
+
+        join_thread(&sender_thread);
+
+        clean_mutex(&g_server_sending_mutex);
+        clean_semaphore(&g_server_sending_semaphore);
+
+    }
 }
 
 #pragma endregion
 
 static char g_name_buffer[MAX_NAME_LEN + 1] = {}; // + 1 for null termination
 
-int main (int argc, char *argv[])
+int main(int argc, char *argv[])
 {
     assert_struct_sizes();
     const char *program = argv[0]; (void)program;
