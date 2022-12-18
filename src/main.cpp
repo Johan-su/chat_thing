@@ -583,6 +583,7 @@ static void client(const char *name)
 
         if (connect(connect_socket, (const struct sockaddr *)&SOCK_addr, sizeof(SOCK_addr)) == SOCKET_ERROR)
         {
+            printf("%d\n", WSAGetLastError());
             TODO("handle failed connection");
         }
     }
