@@ -638,6 +638,7 @@ static void client(const char *name)
         // gracefully exit client
         {
             shutdown(connect_socket, 2); // SD_BOTH
+            closesocket(connect_socket);
 
             release_semaphore(&g_client_sending_semaphore);
 
@@ -926,6 +927,7 @@ static void server()
     // gracefully exit server
     {
         shutdown(server_socket, 2); // SD_Both
+        closesocket(server_socket);
 
         release_semaphore(&g_server_sending_semaphore);
 
