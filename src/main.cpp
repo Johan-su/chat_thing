@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef uint8_t U8;
 typedef uint16_t U16;
@@ -228,6 +229,7 @@ static void kill_thread(Thread *thread)
     {
         TerminateThread(thread->win_handle, 0);
         thread->initalized = false;
+        thread->running = false;
     }
 }
 
@@ -368,8 +370,8 @@ enum DataFormat
 enum CommandType
 {
     INVALID_COMMAND,
-    QUIT_SEVER,
-    ABORT_QUITTING_SERVER,
+    STOP_SERVER,
+    RESUME_SERVER,
     CHANGE_NAME,
 };
 
@@ -681,6 +683,28 @@ static void client(const char *name)
                             MAX_COMMAND_LEN + 1 - (pos + 1));
                         send_data((char *)&command, sizeof(command));
                     }
+                    else if (is_part_str(&command_buffer[1], "stop"))
+                    {
+                        Command command
+                        {
+                            .format = COMMAND,
+                            .command_type = STOP_SERVER,
+                            .data = {},
+                        };
+
+                        send_data((char *)&command, sizeof(command));
+                    }
+                    else if (is_part_str(&command_buffer[1], "resume"))
+                    {
+                        Command command
+                        {
+                            .format = COMMAND,
+                            .command_type = RESUME_SERVER,
+                            .data = {},
+                        };
+
+                        send_data((char *)&command, sizeof(command));
+                    }
                     else
                     {
                         TODO("handle incorrect command");
@@ -740,6 +764,7 @@ struct Client
     char receive_buf[SERVER_RECEIVE_BUF_LEN];
 };
 
+static Thread g_server_shutdown_thread = {};
 
 static volatile Usize g_connection_count = 0;
 static Client g_client_pool[MAX_ACTIVE_THREADS] = {};
@@ -752,6 +777,15 @@ static Semaphore g_server_sending_semaphore = {};
 
 static volatile bool g_server_active = false;
 
+static unsigned long stop(void *)
+{
+    clock_t start = clock();
+    while ((clock() - start) / CLOCKS_PER_SEC < 30 || !g_server_active)
+    {}
+
+    g_server_active = false;
+    return 0;
+}
 
 static unsigned long server_sender(void *)
 {
@@ -849,6 +883,31 @@ static void receive_data_server(Client *client)
                     broadcast_message_to_all_clients("Server", message_buffer);
                 } break;
 
+                case CommandType::STOP_SERVER:
+                {
+                    if (!g_server_shutdown_thread.running)
+                    {
+                        broadcast_message_to_all_clients("Server", "Server shutting down in 30 seconds...");
+                        g_server_shutdown_thread = spawn_thread(stop, false, nullptr);
+                    }
+                    else
+                    {
+                        TODO("handle private message in stop server");
+                    }
+                } break;
+
+                case CommandType::RESUME_SERVER:
+                {
+                    if (g_server_shutdown_thread.running)
+                    {
+                        kill_thread(&g_server_shutdown_thread);
+                        broadcast_message_to_all_clients("Server", "Server resuming, ending stop procedure");
+                    }
+                    else
+                    {
+                        TODO("handle private message in resume server");
+                    }
+                } break;
 
 
                 default: TODO("Handle unknown command");
@@ -1025,8 +1084,16 @@ static void server()
 
     // gracefully exit server
     {
-        shutdown(server_socket, 2); // SD_Both
-        closesocket(server_socket);
+        if (shutdown(server_socket, 2) == SOCKET_ERROR) // SD_Both
+        {
+            print_last_wsaerror();
+            exit(1);
+        }
+        if (closesocket(server_socket) == SOCKET_ERROR)
+        {
+            print_last_wsaerror();
+            exit(1);
+        }
 
         release_semaphore(&g_server_sending_semaphore);
 
