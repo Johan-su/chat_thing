@@ -315,6 +315,13 @@ static void release_semaphore(Semaphore *semaphore)
 #pragma endregion
 
 #pragma region Winsocket
+#include "winsocket_error.cpp"
+
+static void print_last_wsaerror()
+{
+    fprintf(stderr, "ERROR: %s\n", str_from_wsaerror(WSAGetLastError()));
+}
+
 
 static void init_WSA()
 {
@@ -540,7 +547,7 @@ static unsigned long receiver(void *param)
                 
                 default:
                 {
-                    printf("%d\n", error_code);
+                    print_last_wsaerror();
                     TODO("handle error receiving message from server");
                 } break;
             }
@@ -638,8 +645,17 @@ static void client(const char *name)
 
         // gracefully exit client
         {
-            shutdown(connect_socket, 2); // SD_BOTH
-            closesocket(connect_socket);
+            if (shutdown(connect_socket, 2) == SOCKET_ERROR) // SD_BOTH
+            {
+                print_last_wsaerror();
+                TODO("handle shutdown error");
+            }
+
+            if (closesocket(connect_socket) == SOCKET_ERROR)
+            {
+                print_last_wsaerror();
+                TODO("handle closesocket error");
+            }
 
             release_semaphore(&g_client_sending_semaphore);
 
