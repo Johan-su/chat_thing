@@ -192,6 +192,7 @@ static Thread spawn_thread(unsigned long (thread_func)(void *), bool suspended, 
             TODO("handle error failed to create thread");
         }
         thread.initalized = true;
+        thread.running = true;
         thread.id = id;
         thread.win_handle = handle;
     }
@@ -564,7 +565,7 @@ static unsigned long receiver(void *param)
                 {
                     printf("Lost connection to server, server severed connection\n");
                     g_client_active = false;
-                    ungetc('\n', stdin);
+                    exit(0); //TODO(Johan): fix fgets blocking temporary solution
                     return 0;
                 } break;
 
@@ -776,6 +777,8 @@ static char g_server_data_buffer[SERVER_SEND_BUF_LEN] = {};
 static Mutex g_server_sending_mutex = {};
 static Semaphore g_server_sending_semaphore = {};
 
+static volatile SOCKET g_server_socket = {};
+
 static volatile bool g_server_active = false;
 
 static unsigned long stop(void *)
@@ -785,6 +788,11 @@ static unsigned long stop(void *)
     {}
 
     g_server_active = false;
+    if (closesocket(g_server_socket) == SOCKET_ERROR)
+    {
+        print_last_wsaerror();
+        exit(1);
+}
     return 0;
 }
 
@@ -995,8 +1003,16 @@ static unsigned long accept_connections(void *p)
             SOCKET tmp_socket = accept(socket, (struct sockaddr *)&socket_addr, &addr_len);
             if (tmp_socket == INVALID_SOCKET)
             {
-                print_last_wsaerror();
-                TODO("handle error failed to accept connection");
+                switch (WSAGetLastError())
+                {
+                    case WSAEINTR: return 0;
+                
+                    default:
+                    {
+                        print_last_wsaerror();
+                        TODO("handle error failed to accept connection");
+                    } break;
+                }
             }
 
 
@@ -1049,11 +1065,11 @@ static void server()
     g_server_sending_semaphore = create_semaphore(0, 1);
     g_server_sending_mutex = create_mutex();
 
-    SOCKET server_socket;
     {
-        server_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (server_socket == INVALID_SOCKET)
+        g_server_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (g_server_socket == INVALID_SOCKET)
         {
+            print_last_wsaerror();
             TODO("handle failed to create server socket");
         }
 
@@ -1066,13 +1082,15 @@ static void server()
         SOCK_addr.sin_addr.S_un.S_un_b.s_b3 = g_config.ip_bytes[2];
         SOCK_addr.sin_addr.S_un.S_un_b.s_b4 = g_config.ip_bytes[3];
 
-        if (bind(server_socket, (struct sockaddr *)&SOCK_addr, sizeof(SOCK_addr)) == SOCKET_ERROR)
+        if (bind(g_server_socket, (struct sockaddr *)&SOCK_addr, sizeof(SOCK_addr)) == SOCKET_ERROR)
         {
+            print_last_wsaerror();
             TODO("handle failed to bind server socket to ip address");
         }
 
-        if (listen(server_socket, SOMAXCONN) == SOCKET_ERROR)
+        if (listen(g_server_socket, SOMAXCONN) == SOCKET_ERROR)
         {
+            print_last_wsaerror();
             TODO("handle failed to set socket to listener");
         }
     }
@@ -1080,21 +1098,22 @@ static void server()
     Thread sender_thread = spawn_thread(server_sender, false, nullptr);
 
     // main thread accepts connections
-    accept_connections((void *)&server_socket);
+    accept_connections((void *)&g_server_socket);
 
     // gracefully exit server
     {
-        if (shutdown(server_socket, 2) == SOCKET_ERROR) // SD_Both
+        /*
+        if (shutdown(g_server_socket, 2) == SOCKET_ERROR) // SD_Both
         {
             print_last_wsaerror();
             exit(1);
         }
-        if (closesocket(server_socket) == SOCKET_ERROR)
+        if (closesocket(g_server_socket) == SOCKET_ERROR)
         {
             print_last_wsaerror();
             exit(1);
         }
-
+        */
         release_semaphore(&g_server_sending_semaphore);
 
         join_thread(&sender_thread);
