@@ -49,26 +49,6 @@ static T *alloc(Usize amount)
     return (T *)malloc(sizeof(T) * amount);
 }
 
-
-enum class FLAGS
-{
-    HOST,
-    PORT,
-    IP,
-};
-
-struct FlagData
-{
-    FLAGS flag;
-
-    union
-    {
-        U64 data;
-        U8 bytes[8];
-    };
-    
-};
-
 struct Config
 {
     bool host;
@@ -102,6 +82,30 @@ static bool is_str(const char *str1, const char *str2)
     return true;
 }
 
+static bool is_part_str(const char *str1, const char *part_str)
+{
+    if (str1 == nullptr || part_str == nullptr)
+    {
+        return false;
+    }
+
+    while (*str1 != '\0')
+    {
+        if (*part_str == '\0')
+        {
+            return true;
+        }
+        if (*str1 != *part_str)
+        {
+            return false;
+        }
+        str1 += 1;
+        part_str += 1;
+    }
+    
+    return true;
+}
+
 static bool is_number(char chr)
 {
     switch (chr)
@@ -119,6 +123,24 @@ static bool is_number(char chr)
         
         default: return false;
     }
+}
+
+static I64 pos_in_nstr(const char *str1, Usize max_len, char c)
+{
+    Usize count = 0;
+    while (true)
+    {
+        if (count == max_len)
+        {
+            return -1;
+        }
+        if (str1[count] == c)
+        {
+            break;
+        }
+        count += 1;
+    }
+    return (I64)count;
 }
 
 static Usize str_len(const char *str)
@@ -339,7 +361,6 @@ enum DataFormat
     INVALID,
     PUBLIC_MESSAGE,
     PRIVATE_MESSAGE,
-    NAME_CHANGE,
     COMMAND,
     SERVER_BROADCAST,
 };
@@ -349,6 +370,7 @@ enum CommandType
     INVALID_COMMAND,
     QUIT_SEVER,
     ABORT_QUITTING_SERVER,
+    CHANGE_NAME,
 };
 
 enum Settings
@@ -369,7 +391,7 @@ struct PublicMessage
     DataFormat format = PUBLIC_MESSAGE;
     char message[MAX_MESSAGE_LEN];
 };
-
+static_assert(sizeof(PublicMessage) <= RECEIVE_BUF_LEN);
 
 
 struct Command
@@ -378,6 +400,16 @@ struct Command
     CommandType command_type = INVALID_COMMAND;
     char data[MAX_COMMAND_LEN];
 };
+static_assert(sizeof(Command) <= RECEIVE_BUF_LEN);
+
+struct Command2
+{
+    DataFormat format = COMMAND;
+    CommandType command_type = INVALID_COMMAND;
+    char data1[MAX_COMMAND_LEN / 2];
+    char data2[MAX_COMMAND_LEN - MAX_COMMAND_LEN / 2];
+};
+static_assert(sizeof(Command2) <= RECEIVE_BUF_LEN);
 
 struct ServerBroadcast
 {
@@ -385,14 +417,7 @@ struct ServerBroadcast
     char name[MAX_NAME_LEN];
     char message[MAX_MESSAGE_LEN];
 };
-
-
-static void assert_struct_sizes()
-{
-    assert(sizeof(PublicMessage) <= RECEIVE_BUF_LEN);
-    assert(sizeof(Command) <= RECEIVE_BUF_LEN);
-    assert(sizeof(ServerBroadcast) <= RECEIVE_BUF_LEN);
-}
+static_assert(sizeof(ServerBroadcast)<= RECEIVE_BUF_LEN);
 
 
 #pragma region Client
@@ -492,11 +517,6 @@ static void receive_data_client(char *raw_data)
             TODO("handle client receiving");
         } return;
 
-        case DataFormat::NAME_CHANGE:
-        {
-            TODO("handle client receiving");
-        } return;
-
         case DataFormat::COMMAND:
         {
             TODO("handle client receiving");
@@ -542,6 +562,12 @@ static unsigned long receiver(void *param)
                 {
                     printf("Lost connection to server, server severed connection\n");
                     g_client_active = false;
+                    ungetc('\n', stdin);
+                    return 0;
+                } break;
+
+                case WSAEINTR:
+                {
                     return 0;
                 } break;
                 
@@ -609,7 +635,7 @@ static void client(const char *name)
         Thread receive_thread = spawn_thread(receiver, false, &rparams);
 
         {
-            char command_buffer[MAX_COMMAND_LEN + 1]; // + 1 for null termination
+            char command_buffer[MAX_COMMAND_LEN + 3]; // + 3 for '/' '\n' and '\0'
             
             while (g_client_active)
             {
@@ -620,16 +646,40 @@ static void client(const char *name)
                     {
                         TODO("handle error with command_buffer input");
                     }
+                    if (!g_client_active)
+                    {
+                        break;
+                    }
+                    command_buffer[strcspn(command_buffer, "\n")] = '\0';
                 }
                 if (command_buffer[0] == '/')
                 {
-                    if (is_str(&command_buffer[1], "q"))
+                    if (is_part_str(&command_buffer[1], "quit"))
                     {
                         g_client_active = false;
                     }
-                    else if (false)
+                    else if (is_part_str(&command_buffer[1], "change_name"))
                     {
+                        Usize pos;
+                        {
+                            I64 pos_ = pos_in_nstr(command_buffer, sizeof(command_buffer), ' ');
+                            if (pos_ == -1)
+                            {
+                                TODO("handle error space not in command_buffer");
+                            }
+                            pos = (Usize)pos_;
+                        }
 
+                        Command command =
+                        {
+                            .format = COMMAND,
+                            .command_type = CHANGE_NAME,
+                            .data = {},
+                        }; //TODO(Johan): check if memcpy works correctly
+                        memcpy(&command.data, 
+                            &command_buffer[pos + 1], 
+                            MAX_COMMAND_LEN + 1 - (pos + 1));
+                        send_data((char *)&command, sizeof(command));
                     }
                     else
                     {
@@ -784,14 +834,21 @@ static void receive_data_server(Client *client)
             TODO("handle private message");
         } return;
 
-        case DataFormat::NAME_CHANGE:
-        {
-            TODO("handle name change");
-        } return;
-
         case DataFormat::COMMAND:
         {
-            TODO("handle command");
+            Command *command = (Command *)raw_data;
+            CommandType *command_type = (CommandType *)(format + 1);
+            switch (*command_type)
+            {
+                case CHANGE_NAME:
+                {
+                    memcpy(client->name, command->data, MAX_NAME_LEN);
+                } break;
+
+
+
+                default: TODO("Handle unknown command");
+            }
 
         } return;
         case DataFormat::SERVER_BROADCAST:
@@ -802,6 +859,7 @@ static void receive_data_server(Client *client)
     }
 }
 
+
 static unsigned long client_to_server_receiver(void *param)
 {
     Client *client = (Client *)param; 
@@ -811,7 +869,28 @@ static unsigned long client_to_server_receiver(void *param)
         I32 bytes_received = recv(client->socket, client->receive_buf, RECEIVE_BUF_LEN, flags);
         if (bytes_received == SOCKET_ERROR)
         {
-            TODO("handle error receiving message from client");
+            switch(WSAGetLastError())
+            {
+                case WSAECONNRESET:
+                {
+                    client->active = false;
+                    closesocket(client->socket);
+                    {
+                        char message_buffer[MAX_NAME_LEN + 23 + 1];
+                        snprintf(message_buffer, sizeof(message_buffer), "%s forcibly disconnected\n", client->name);
+                        broadcast_message_to_all_clients("Server", message_buffer);   
+                    }
+                    memset(client, 0, sizeof(Client));
+                    return 0;
+                } break;
+
+                default:
+                {
+                    print_last_wsaerror();
+                    TODO("handle error receiving bytes from client");
+                } break;
+            }
+
         }
         printf("received %d bytes from %.*s\n", bytes_received, MAX_NAME_LEN, client->name);
         
@@ -901,7 +980,6 @@ static unsigned long accept_connections(void *p)
 }
 
 
-
 static void server()
 {
     g_server_active = true;
@@ -962,7 +1040,6 @@ static char g_name_buffer[MAX_NAME_LEN + 1] = {}; // + 1 for null termination
 
 int main(int argc, char *argv[])
 {
-    assert_struct_sizes();
     const char *program = argv[0]; (void)program;
 
     // initalize config
