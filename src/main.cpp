@@ -842,7 +842,11 @@ static void receive_data_server(Client *client)
             {
                 case CHANGE_NAME:
                 {
+                    char message_buffer[2 * MAX_NAME_LEN + 17 + 1] = {};
+
+                    snprintf(message_buffer, sizeof(message_buffer), "%.*s changed name to %.*s", MAX_NAME_LEN, client->name, MAX_NAME_LEN, command->data);
                     memcpy(client->name, command->data, MAX_NAME_LEN);
+                    broadcast_message_to_all_clients("Server", message_buffer);
                 } break;
 
 
