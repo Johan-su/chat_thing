@@ -604,6 +604,7 @@ static void client(const char *name)
         connect_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (connect_socket == INVALID_SOCKET)
         {
+            print_last_wsaerror();
             TODO("handle invalid connect_socket");
         }
 
@@ -618,7 +619,7 @@ static void client(const char *name)
 
         if (connect(connect_socket, (const struct sockaddr *)&SOCK_addr, sizeof(SOCK_addr)) == SOCKET_ERROR)
         {
-            printf("%d\n", WSAGetLastError());
+            print_last_wsaerror();
             TODO("handle failed connection");
         }
     }
@@ -994,8 +995,7 @@ static unsigned long accept_connections(void *p)
             SOCKET tmp_socket = accept(socket, (struct sockaddr *)&socket_addr, &addr_len);
             if (tmp_socket == INVALID_SOCKET)
             {
-                fprintf(stderr, "failed to accept connection with, %d \n", WSAGetLastError());
-                exit(1);
+                print_last_wsaerror();
                 TODO("handle error failed to accept connection");
             }
 
