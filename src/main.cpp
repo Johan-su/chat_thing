@@ -104,7 +104,12 @@ static bool is_part_str(const char *str1, const char *part_str)
         part_str += 1;
     }
     
+    if (*str1 == *part_str)
+    {
     return true;
+    }
+
+    return false;
 }
 
 static bool is_number(char chr)
