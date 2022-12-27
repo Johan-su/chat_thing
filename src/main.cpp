@@ -94,33 +94,21 @@ static bool is_str(const char *str1, const char *str2)
     return true;
 }
 
-static bool is_part_str(const char *str1, const char *part_str)
+static bool is_part_str_range(const char *str1, Usize start, Usize end, const char *part_str)
 {
-    if (str1 == nullptr || part_str == nullptr)
+    str1 += start;
+    for (Usize count = 0; count < end - start; ++count)
     {
-        return false;
-    }
-
-    while (*str1 != '\0')
-    {
-        if (*part_str == '\0')
-        {
-            return true;
-        }
-        if (*str1 != *part_str)
+        if (str1[count] != part_str[count])
         {
             return false;
         }
-        str1 += 1;
-        part_str += 1;
-    }
-    
-    if (*str1 == *part_str)
-    {
-        return true;
+
+
+        count += 1;
     }
 
-    return false;
+    return true;
 }
 
 static bool is_number(char chr)
@@ -373,6 +361,10 @@ static void init_WSA()
         TODO("handle WSA startup error");
     }
 }
+
+
+
+
 #pragma endregion
 
 enum DataFormat
@@ -447,6 +439,113 @@ struct ServerBroadcast
 static_assert(sizeof(ServerBroadcast)<= RECEIVE_BUF_LEN);
 
 
+#pragma region CommandList
+
+static void send_data(char *byte_buffer, Usize buf_size);
+extern volatile bool g_client_active;
+
+struct ClientCommand
+{
+    const char *name;
+    void (*func)(char *, Usize);
+    const char *desc;
+};
+
+#define COMMAND_LIST_CAPACITY 256
+
+extern ClientCommand g_client_commands[COMMAND_LIST_CAPACITY];
+
+
+static void quit(char *, Usize)
+{
+    g_client_active = false;
+}
+
+
+static void change_name(char *command_buffer, Usize buf_len)
+{
+    Usize pos;
+    {
+        I64 pos_ = pos_in_nstr(command_buffer, buf_len, ' ');
+        if (pos_ == -1)
+        {
+            TODO("handle error space not in command_buffer");
+        }
+        pos = (Usize)pos_;
+    }
+
+    Command command =
+    {
+        .format = COMMAND,
+        .command_type = CHANGE_NAME,
+        .data = {},
+    }; //TODO(Johan): check if memcpy works correctly
+    memcpy(&command.data, 
+        &command_buffer[pos + 1], 
+        MAX_COMMAND_LEN + 1 - (pos + 1));
+    send_data((char *)&command, sizeof(command));
+}
+
+static void stop(char *, Usize)
+{
+    Command command
+    {
+        .format = COMMAND,
+        .command_type = STOP_SERVER,
+        .data = {},
+    };
+
+    send_data((char *)&command, sizeof(command));
+}
+
+static void resume(char *, Usize)
+{
+    Command command
+    {
+        .format = COMMAND,
+        .command_type = RESUME_SERVER,
+        .data = {},
+    };
+
+    send_data((char *)&command, sizeof(command));
+}
+
+static void help(char *command_buffer, Usize buf_len)
+{
+    
+    I64 pos = pos_in_nstr(command_buffer, buf_len, ' ');
+
+    if (pos == -1 || command_buffer[pos + 1] == '\0')
+    {
+        for (Usize i = 0; i < ARRAY_COUNT(g_client_commands); ++i)
+        {
+            if (g_client_commands[i].name == nullptr)
+            {
+                break;
+            }
+            printf("%s: %s\n", g_client_commands[i].name, g_client_commands[i].desc);
+        }
+    }
+    else
+    {
+        TODO("implement help for specific commands");
+    }
+}
+
+ClientCommand g_client_commands[COMMAND_LIST_CAPACITY] = {
+    {"quit", quit, ""},
+    {"change_name", change_name, ""},
+    {"stop", stop, ""},
+    {"resume", resume, ""},
+    {"help", help, ""},
+    {"h", help, ""},
+};
+
+#pragma endregion
+
+
+
+
 #pragma region Client
 
 enum ClientSettings
@@ -460,7 +559,7 @@ static Semaphore g_client_sending_semaphore = {};
 static Mutex g_client_sending_mutex = {};
 static char g_client_message_buffer[SEND_BUF_LEN] = {};
 
-static volatile bool g_client_active = false;
+volatile bool g_client_active = false;
 
 static unsigned long client_sender(void *p)
 {
@@ -521,8 +620,6 @@ static void send_message(const char *message)
     memcpy(&sb.message, message, message_len);
     send_data((char *)&sb, sizeof(sb));
 }
-
-
 
 static void receive_data_client(char *raw_data)
 {
@@ -618,6 +715,7 @@ static unsigned long receiver(void *param)
 }
 
 
+
 static void client(const char *name)
 {
     g_client_active = true;
@@ -683,58 +781,20 @@ static void client(const char *name)
                 }
                 if (command_buffer[0] == '/')
                 {
-                    if (is_part_str(&command_buffer[1], "quit"))
+                    for (Usize i = 0; i < COMMAND_LIST_CAPACITY; ++i)
                     {
-                        g_client_active = false;
-                    }
-                    else if (is_part_str(&command_buffer[1], "change_name"))
-                    {
-                        Usize pos;
+                        Usize space_pos = str_len(command_buffer);
                         {
-                            I64 pos_ = pos_in_nstr(command_buffer, sizeof(command_buffer), ' ');
-                            if (pos_ == -1)
+                            I64 pos_ = pos_in_nstr(command_buffer, ARRAY_COUNT(command_buffer), ' ');
+                            if (pos_ != -1)
                             {
-                                TODO("handle error space not in command_buffer");
+                                space_pos = (Usize)pos_;
                             }
-                            pos = (Usize)pos_;
                         }
-
-                        Command command =
+                        if (is_part_str_range(command_buffer, 1, space_pos, g_client_commands[i].name))
                         {
-                            .format = COMMAND,
-                            .command_type = CHANGE_NAME,
-                            .data = {},
-                        }; //TODO(Johan): check if memcpy works correctly
-                        memcpy(&command.data, 
-                            &command_buffer[pos + 1], 
-                            MAX_COMMAND_LEN + 1 - (pos + 1));
-                        send_data((char *)&command, sizeof(command));
-                    }
-                    else if (is_part_str(&command_buffer[1], "stop"))
-                    {
-                        Command command
-                        {
-                            .format = COMMAND,
-                            .command_type = STOP_SERVER,
-                            .data = {},
-                        };
-
-                        send_data((char *)&command, sizeof(command));
-                    }
-                    else if (is_part_str(&command_buffer[1], "resume"))
-                    {
-                        Command command
-                        {
-                            .format = COMMAND,
-                            .command_type = RESUME_SERVER,
-                            .data = {},
-                        };
-
-                        send_data((char *)&command, sizeof(command));
-                    }
-                    else
-                    {
-                        TODO("handle incorrect command");
+                            g_client_commands[i].func(command_buffer, ARRAY_COUNT(command_buffer));
+                        }
                     }
                 }
                 else
@@ -771,6 +831,7 @@ static void client(const char *name)
 }
 
 #pragma endregion
+
 
 #pragma region Server
 
@@ -809,7 +870,7 @@ static volatile Client *g_server_private_client = nullptr;
 
 static volatile bool g_server_active = false;
 
-static unsigned long stop(void *)
+static unsigned long stop_server(void *)
 {
     clock_t start = clock();
     while ((clock() - start) / CLOCKS_PER_SEC < 30 || !g_server_active)
@@ -976,7 +1037,7 @@ static void receive_data_server(Client *client)
                     if (!g_server_shutdown_thread.running)
                     {
                         broadcast_message_to_all_clients("Server", "Server shutting down in 30 seconds...");
-                        g_server_shutdown_thread = spawn_thread(stop, false, nullptr);
+                        g_server_shutdown_thread = spawn_thread(stop_server, false, nullptr);
                     }
                     else
                     {
@@ -1204,6 +1265,7 @@ static void server()
 }
 
 #pragma endregion
+
 
 static char g_name_buffer[MAX_NAME_LEN + 1] = {}; // + 1 for null termination
 
