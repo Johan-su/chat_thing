@@ -401,6 +401,14 @@ struct PublicMessage
 };
 static_assert(sizeof(PublicMessage) <= RECEIVE_BUF_LEN);
 
+struct PrivateMessage
+{
+    DataFormat format = PRIVATE_MESSAGE;
+    char name[MAX_NAME_LEN];
+    char message[MAX_MESSAGE_LEN];
+};
+static_assert(sizeof(PrivateMessage) <= RECEIVE_BUF_LEN);
+
 
 struct Command
 {
@@ -522,7 +530,8 @@ static void receive_data_client(char *raw_data)
 
         case DataFormat::PRIVATE_MESSAGE:
         {
-            TODO("handle client receiving");
+            PrivateMessage *pm = (PrivateMessage *)raw_data;
+            printf("%.*s [pm] : %.*s\n", MAX_NAME_LEN, pm->name, MAX_MESSAGE_LEN, pm->message);
         } return;
 
         case DataFormat::COMMAND:
@@ -784,6 +793,9 @@ static Semaphore g_server_sending_semaphore = {};
 
 static volatile SOCKET g_server_socket = {};
 
+static volatile bool g_server_broadcast = false;
+static volatile Client *g_server_private_client = nullptr;
+
 static volatile bool g_server_active = false;
 
 static unsigned long stop(void *)
@@ -811,20 +823,41 @@ static unsigned long server_sender(void *)
         {
             break;
         }
-
+        if (g_server_broadcast)
+        {
         for (Usize i = 0; i < ARRAY_COUNT(g_client_pool); ++i)
         {
             if (g_client_pool[i].active)
             {
                 I32 flags = 0;
                 I32 bytes_sent = send(g_client_pool[i].socket, g_server_data_buffer, SEND_BUF_LEN, flags);
+                    if (bytes_sent == SOCKET_ERROR)
+                    {
+                        TODO("handle failed to send bytes");
+                    }
+                    printf("sent %d bytes\n", bytes_sent);
+                }
+            }
+        }
+        else
+        {
+            if (g_server_private_client->active)
+            {
+                I32 flags = 0;
+                I32 bytes_sent = send(g_server_private_client->socket, g_server_data_buffer, SEND_BUF_LEN, flags);
                 if (bytes_sent == SOCKET_ERROR)
                 {
                     TODO("handle failed to send bytes");
                 }
                 printf("sent %d bytes\n", bytes_sent);
+                g_server_private_client = nullptr;
+            }
+            else
+            {
+                TODO("handle sending private message to inactive client");
             }
         }
+
         memset(g_server_data_buffer, 0, sizeof(g_server_data_buffer));
             g_server_data_send_lock = true;
     }
@@ -850,6 +883,36 @@ static void broadcast_message_to_all_clients(const char *name, const char *messa
     memcpy(sb.message, message, sizeof(char) * message_len);
     memcpy(g_server_data_buffer, &sb, sizeof(sb));
     printf("%.*s : %.*s\n", MAX_NAME_LEN, sb.name, MAX_MESSAGE_LEN, sb.message);
+    g_server_broadcast = true;
+    g_server_data_send_lock = false;
+    release_semaphore(&g_server_sending_semaphore);
+
+    while (g_server_data_send_lock == false)
+    {}
+
+    release_mutex(&g_server_sending_mutex);
+}
+
+static void server_send_private_message(const char *name, const char *message, Client *client)
+{
+    lock_mutex(&g_server_sending_mutex);
+
+    Usize name_len = str_nlen(name, MAX_NAME_LEN);
+    Usize message_len = str_nlen(message, MAX_MESSAGE_LEN);
+
+
+    PrivateMessage pm = {
+        .format = PRIVATE_MESSAGE,
+        .name = {},
+        .message = {},
+    };
+
+    memcpy(pm.name, name, sizeof(char) * name_len);
+    memcpy(pm.message, message, sizeof(char) * message_len);
+    memcpy(g_server_data_buffer, &pm, sizeof(pm));
+    printf("%.*s : %.*s\n", MAX_NAME_LEN, pm.name, MAX_MESSAGE_LEN, pm.message);
+    g_server_broadcast = false;
+    g_server_private_client = client;
     g_server_data_send_lock = false;
     release_semaphore(&g_server_sending_semaphore);
 
@@ -906,7 +969,7 @@ static void receive_data_server(Client *client)
                     }
                     else
                     {
-                        TODO("handle private message in stop server");
+                        server_send_private_message("Server", "Server is already shutting down", client);
                     }
                 } break;
 
@@ -919,7 +982,7 @@ static void receive_data_server(Client *client)
                     }
                     else
                     {
-                        TODO("handle private message in resume server");
+                        server_send_private_message("Server", "Server has already resumed/was not shutting down", client);
                     }
                 } break;
 
