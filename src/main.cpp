@@ -17,6 +17,17 @@ typedef int16_t I16;
 typedef int32_t I32;
 typedef int64_t I64;
 
+
+static_assert(sizeof(U8) == 1);
+static_assert(sizeof(U16) == 2);
+static_assert(sizeof(U32) == 4);
+static_assert(sizeof(U64) == 8);
+
+static_assert(sizeof(I8) == 1);
+static_assert(sizeof(I16) == 2);
+static_assert(sizeof(I32) == 4);
+static_assert(sizeof(I64) == 8);
+
 #define DEBUG_ASSERTS
 
 #ifdef DEBUG_ASSERTS
@@ -106,7 +117,7 @@ static bool is_part_str(const char *str1, const char *part_str)
     
     if (*str1 == *part_str)
     {
-    return true;
+        return true;
     }
 
     return false;
@@ -825,12 +836,12 @@ static unsigned long server_sender(void *)
         }
         if (g_server_broadcast)
         {
-        for (Usize i = 0; i < ARRAY_COUNT(g_client_pool); ++i)
-        {
-            if (g_client_pool[i].active)
+            for (Usize i = 0; i < ARRAY_COUNT(g_client_pool); ++i)
             {
-                I32 flags = 0;
-                I32 bytes_sent = send(g_client_pool[i].socket, g_server_data_buffer, SEND_BUF_LEN, flags);
+                if (g_client_pool[i].active)
+                {
+                    I32 flags = 0;
+                    I32 bytes_sent = send(g_client_pool[i].socket, g_server_data_buffer, SEND_BUF_LEN, flags);
                     if (bytes_sent == SOCKET_ERROR)
                     {
                         TODO("handle failed to send bytes");
@@ -859,7 +870,7 @@ static unsigned long server_sender(void *)
         }
 
         memset(g_server_data_buffer, 0, sizeof(g_server_data_buffer));
-            g_server_data_send_lock = true;
+        g_server_data_send_lock = true;
     }
     return 0;
 }
