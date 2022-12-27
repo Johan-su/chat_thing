@@ -17,7 +17,6 @@ typedef int16_t I16;
 typedef int32_t I32;
 typedef int64_t I64;
 
-
 static_assert(sizeof(U8) == 1);
 static_assert(sizeof(U16) == 2);
 static_assert(sizeof(U32) == 4);
@@ -44,6 +43,57 @@ static_assert(sizeof(I64) == 8);
 #define assert(expression)
 #endif
 
+
+#define LOG_LEVEL_NONE 0
+#define LOG_LEVEL_ERROR 1
+#define LOG_LEVEL_WARN 2
+#define LOG_LEVEL_INFO 3
+#define LOG_LEVEL_DEBUG 4
+
+
+#define LOG_LEVEL LOG_LEVEL_INFO
+
+#if LOG_LEVEL >= LOG_LEVEL_NONE
+
+static FILE *stream = stdout;
+
+#define LOG_ERROR(format, vargs...)
+#define LOG_WARN(format, vargs...)
+#define LOG_INFO(format, vargs...)
+#define LOG_DEBUG(format, vargs...)
+
+#define INTERNAL_LOG_(level, format, vargs...) \
+do \
+{ \
+    fprintf(stream, "[%s] ", level); \
+    fprintf(stream, format, vargs); \
+    fprintf(stream, "\n"); \
+} while (0)
+
+
+#if LOG_LEVEL >= LOG_LEVEL_ERROR
+#undef LOG_ERROR
+#define LOG_ERROR(format, vargs...) INTERNAL_LOG_("ERROR", format, vargs)
+#endif
+
+#if LOG_LEVEL >= LOG_LEVEL_WARN
+#undef LOG_WARN
+#define LOG_WARN(format, vargs...) INTERNAL_LOG_("WARNING", format, vargs)
+#endif
+
+#if LOG_LEVEL >= LOG_LEVEL_INFO
+#undef LOG_INFO
+#define LOG_INFO(format, vargs...) INTERNAL_LOG_("INFO", format, vargs)
+#endif
+
+#if LOG_LEVEL >= LOG_LEVEL_DEBUG
+#undef LOG_DEBUG
+#define LOG_DEBUG(format, vargs...) INTERNAL_LOG_("DEBUG", format, vargs)
+#endif
+
+#endif
+
+
 #define TODO(string)                                                                   \
     do                                                                                 \
     {                                                                                  \
@@ -53,7 +103,6 @@ static_assert(sizeof(I64) == 8);
 
 
 #define ARRAY_COUNT(array) sizeof(array) / sizeof(array[0])
-
 
 template <typename T>
 static T *alloc(Usize amount)
@@ -73,6 +122,16 @@ static Config g_config = {
     .port = 25565,
     .ip_bytes = {127, 0, 0, 1},
 }; 
+
+static Usize str_len(const char *str)
+{
+    Usize count = 0;
+    while (str[count] != '\0')
+    {
+        count += 1;
+    }
+    return count;
+}
 
 static bool is_str(const char *str1, const char *str2)
 {
@@ -96,6 +155,17 @@ static bool is_str(const char *str1, const char *str2)
 
 static bool is_part_str_range(const char *str1, Usize start, Usize end, const char *part_str)
 {
+    if (str1 == nullptr || part_str == nullptr)
+    {
+        return false;
+    }
+
+
+    if (str_len(part_str) > end - start)
+    {
+        return false;
+    }
+
     str1 += start;
     for (Usize count = 0; count < end - start; ++count)
     {
@@ -146,16 +216,6 @@ static I64 pos_in_nstr(const char *str1, Usize max_len, char c)
         count += 1;
     }
     return (I64)count;
-}
-
-static Usize str_len(const char *str)
-{
-    Usize count = 0;
-    while (str[count] != '\0')
-    {
-        count += 1;
-    }
-    return count;
 }
 
 static Usize str_nlen(const char *str, Usize max)
@@ -396,7 +456,6 @@ enum Settings
     MAX_COMMAND_LEN = RECEIVE_BUF_LEN - COMMAND_HEADER_LEN,
 };
 
-
 struct PublicMessage
 {
     DataFormat format = PUBLIC_MESSAGE;
@@ -411,7 +470,6 @@ struct PrivateMessage
     char message[MAX_MESSAGE_LEN];
 };
 static_assert(sizeof(PrivateMessage) <= RECEIVE_BUF_LEN);
-
 
 struct Command
 {
@@ -437,7 +495,6 @@ struct ServerBroadcast
     char message[MAX_MESSAGE_LEN];
 };
 static_assert(sizeof(ServerBroadcast)<= RECEIVE_BUF_LEN);
-
 
 #pragma region CommandList
 
@@ -469,7 +526,8 @@ static void change_name(char *command_buffer, Usize buf_len)
         I64 pos_ = pos_in_nstr(command_buffer, buf_len, ' ');
         if (pos_ == -1)
         {
-            TODO("handle error space not in command_buffer");
+            printf("/change_name <name>\n");
+            return;
         }
         pos = (Usize)pos_;
     }
@@ -543,9 +601,6 @@ ClientCommand g_client_commands[COMMAND_LIST_CAPACITY] = {
 
 #pragma endregion
 
-
-
-
 #pragma region Client
 
 enum ClientSettings
@@ -579,7 +634,7 @@ static unsigned long client_sender(void *p)
         {
             TODO("handle failed to send bytes");
         }
-        printf("sent %d bytes\n", bytes_sent);
+        LOG_DEBUG("sent %d bytes\n", bytes_sent);
 
 
         memset(g_client_message_buffer, 0, sizeof(g_client_message_buffer));
@@ -703,7 +758,7 @@ static unsigned long receiver(void *param)
                 } break;
             }
         }
-        printf("received %d bytes\n", bytes_received);
+        LOG_DEBUG("received %d bytes\n", bytes_received);
         if (bytes_received == 0)
         {
             return 0;
@@ -724,6 +779,7 @@ static void client(const char *name)
 
     SOCKET connect_socket;
     // initalize socket
+    LOG_INFO("initalizing socket");
     {
         connect_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (connect_socket == INVALID_SOCKET)
@@ -741,6 +797,7 @@ static void client(const char *name)
         SOCK_addr.sin_addr.S_un.S_un_b.s_b3 = g_config.ip_bytes[2];
         SOCK_addr.sin_addr.S_un.S_un_b.s_b4 = g_config.ip_bytes[3];
 
+        LOG_INFO("Connecting to server");
         if (connect(connect_socket, (const struct sockaddr *)&SOCK_addr, sizeof(SOCK_addr)) == SOCKET_ERROR)
         {
             print_last_wsaerror();
@@ -781,20 +838,31 @@ static void client(const char *name)
                 }
                 if (command_buffer[0] == '/')
                 {
+                    Usize space_pos = str_len(command_buffer);
+                    {
+                        I64 pos_ = pos_in_nstr(command_buffer, ARRAY_COUNT(command_buffer), ' ');
+                        if (pos_ != -1)
+                        {
+                            space_pos = (Usize)pos_;
+                        }
+                    }
+                    bool found_func = false;
                     for (Usize i = 0; i < COMMAND_LIST_CAPACITY; ++i)
                     {
-                        Usize space_pos = str_len(command_buffer);
-                        {
-                            I64 pos_ = pos_in_nstr(command_buffer, ARRAY_COUNT(command_buffer), ' ');
-                            if (pos_ != -1)
-                            {
-                                space_pos = (Usize)pos_;
-                            }
-                        }
                         if (is_part_str_range(command_buffer, 1, space_pos, g_client_commands[i].name))
                         {
                             g_client_commands[i].func(command_buffer, ARRAY_COUNT(command_buffer));
+                            found_func = true;
+                            break;
                         }
+                        if (g_client_commands[i].name == nullptr)
+                        {
+                            break;
+                        }
+                    }
+                    if (!found_func)
+                    {
+                        printf("Command not found, run /help for help\n");
                     }
                 }
                 else
@@ -832,7 +900,6 @@ static void client(const char *name)
 
 #pragma endregion
 
-
 #pragma region Server
 
 enum ServerSettings
@@ -852,32 +919,50 @@ struct Client
     char receive_buf[SERVER_RECEIVE_BUF_LEN];
 };
 
-static Thread g_server_shutdown_thread = {};
 
-static volatile Usize g_connection_count = 0;
-static Client g_client_pool[MAX_ACTIVE_THREADS] = {};
+struct Server
+{
+    Thread shutdown_thread; 
 
-static volatile bool g_server_data_send_lock = true;
-static char g_server_data_buffer[SERVER_SEND_BUF_LEN] = {};
+    volatile Usize connection_count; 
+    Client client_pool[MAX_ACTIVE_THREADS]; 
 
-static Mutex g_server_sending_mutex = {};
-static Semaphore g_server_sending_semaphore = {};
+    volatile bool data_send_lock; 
+    char data_buffer[SERVER_SEND_BUF_LEN]; 
 
-static volatile SOCKET g_server_socket = {};
+    Mutex sending_mutex; 
+    Semaphore sending_semaphore; 
 
-static volatile bool g_server_broadcast = false;
-static volatile Client *g_server_private_client = nullptr;
+    volatile SOCKET socket; 
 
-static volatile bool g_server_active = false;
+    volatile bool broadcast; 
+    volatile Client *private_client; 
+
+    volatile bool active; 
+};
+
+static Server g_server = {
+    .shutdown_thread = {},
+    .connection_count = 0,
+    .client_pool = {},
+    .data_send_lock = true,
+    .data_buffer = {},
+    .sending_mutex = {},
+    .sending_semaphore = {},
+    .socket = {},
+    .broadcast = false,
+    .private_client = nullptr,
+    .active = false,
+};
 
 static unsigned long stop_server(void *)
 {
     clock_t start = clock();
-    while ((clock() - start) / CLOCKS_PER_SEC < 30 || !g_server_active)
+    while ((clock() - start) / CLOCKS_PER_SEC < 30 || !g_server.active)
     {}
 
-    g_server_active = false;
-    if (closesocket(g_server_socket) == SOCKET_ERROR)
+    g_server.active = false;
+    if (closesocket(g_server.socket) == SOCKET_ERROR)
     {
         print_last_wsaerror();
         exit(1);
@@ -890,56 +975,56 @@ static unsigned long server_sender(void *)
     while (true)
     {
         // wait on broadcasting thread to copy data to send buffer
-        wait_semaphore(&g_server_sending_semaphore);
-        if (!g_server_active)
+        wait_semaphore(&g_server.sending_semaphore);
+        if (!g_server.active)
         {
             break;
         }
-        if (g_server_broadcast)
+        if (g_server.broadcast)
         {
-            for (Usize i = 0; i < ARRAY_COUNT(g_client_pool); ++i)
+            for (Usize i = 0; i < ARRAY_COUNT(g_server.client_pool); ++i)
             {
-                if (g_client_pool[i].active)
+                if (g_server.client_pool[i].active)
                 {
                     I32 flags = 0;
-                    I32 bytes_sent = send(g_client_pool[i].socket, g_server_data_buffer, SEND_BUF_LEN, flags);
+                    I32 bytes_sent = send(g_server.client_pool[i].socket, g_server.data_buffer, SEND_BUF_LEN, flags);
                     if (bytes_sent == SOCKET_ERROR)
                     {
                         TODO("handle failed to send bytes");
                     }
-                    printf("sent %d bytes\n", bytes_sent);
+                    LOG_DEBUG("sent %d bytes\n", bytes_sent);
                 }
             }
         }
         else
         {
-            if (g_server_private_client->active)
+            if (g_server.private_client->active)
             {
                 I32 flags = 0;
-                I32 bytes_sent = send(g_server_private_client->socket, g_server_data_buffer, SEND_BUF_LEN, flags);
+                I32 bytes_sent = send(g_server.private_client->socket, g_server.data_buffer, SEND_BUF_LEN, flags);
                 if (bytes_sent == SOCKET_ERROR)
                 {
                     TODO("handle failed to send bytes");
                 }
-                printf("sent %d bytes\n", bytes_sent);
-                g_server_private_client = nullptr;
+                LOG_DEBUG("sent %d bytes\n", bytes_sent);
+                g_server.private_client = nullptr;
             }
             else
             {
-                TODO("handle sending private message to inactive client");
+                LOG_WARN("Tried to send private message to inactive client");
+                return 0;
             }
         }
 
-        memset(g_server_data_buffer, 0, sizeof(g_server_data_buffer));
-        g_server_data_send_lock = true;
+        memset(g_server.data_buffer, 0, sizeof(g_server.data_buffer));
+        g_server.data_send_lock = true;
     }
     return 0;
 }
 
-
 static void broadcast_message_to_all_clients(const char *name, const char *message)
 {
-    lock_mutex(&g_server_sending_mutex);
+    lock_mutex(&g_server.sending_mutex);
 
     Usize name_len = str_nlen(name, MAX_NAME_LEN);
     Usize message_len = str_nlen(message, MAX_MESSAGE_LEN);
@@ -953,21 +1038,21 @@ static void broadcast_message_to_all_clients(const char *name, const char *messa
 
     memcpy(sb.name, name, sizeof(char) * name_len);
     memcpy(sb.message, message, sizeof(char) * message_len);
-    memcpy(g_server_data_buffer, &sb, sizeof(sb));
+    memcpy(g_server.data_buffer, &sb, sizeof(sb));
     printf("%.*s : %.*s\n", MAX_NAME_LEN, sb.name, MAX_MESSAGE_LEN, sb.message);
-    g_server_broadcast = true;
-    g_server_data_send_lock = false;
-    release_semaphore(&g_server_sending_semaphore);
+    g_server.broadcast = true;
+    g_server.data_send_lock = false;
+    release_semaphore(&g_server.sending_semaphore);
 
-    while (g_server_data_send_lock == false)
+    while (g_server.data_send_lock == false)
     {}
 
-    release_mutex(&g_server_sending_mutex);
+    release_mutex(&g_server.sending_mutex);
 }
 
 static void server_send_private_message(const char *name, const char *message, Client *client)
 {
-    lock_mutex(&g_server_sending_mutex);
+    lock_mutex(&g_server.sending_mutex);
 
     Usize name_len = str_nlen(name, MAX_NAME_LEN);
     Usize message_len = str_nlen(message, MAX_MESSAGE_LEN);
@@ -981,17 +1066,17 @@ static void server_send_private_message(const char *name, const char *message, C
 
     memcpy(pm.name, name, sizeof(char) * name_len);
     memcpy(pm.message, message, sizeof(char) * message_len);
-    memcpy(g_server_data_buffer, &pm, sizeof(pm));
+    memcpy(g_server.data_buffer, &pm, sizeof(pm));
     printf("%.*s : %.*s\n", MAX_NAME_LEN, pm.name, MAX_MESSAGE_LEN, pm.message);
-    g_server_broadcast = false;
-    g_server_private_client = client;
-    g_server_data_send_lock = false;
-    release_semaphore(&g_server_sending_semaphore);
+    g_server.broadcast = false;
+    g_server.private_client = client;
+    g_server.data_send_lock = false;
+    release_semaphore(&g_server.sending_semaphore);
 
-    while (g_server_data_send_lock == false)
+    while (g_server.data_send_lock == false)
     {}
 
-    release_mutex(&g_server_sending_mutex);
+    release_mutex(&g_server.sending_mutex);
 }
 
 static void receive_data_server(Client *client)
@@ -1034,10 +1119,10 @@ static void receive_data_server(Client *client)
 
                 case CommandType::STOP_SERVER:
                 {
-                    if (!g_server_shutdown_thread.running)
+                    if (!g_server.shutdown_thread.running)
                     {
                         broadcast_message_to_all_clients("Server", "Server shutting down in 30 seconds...");
-                        g_server_shutdown_thread = spawn_thread(stop_server, false, nullptr);
+                        g_server.shutdown_thread = spawn_thread(stop_server, false, nullptr);
                     }
                     else
                     {
@@ -1047,9 +1132,9 @@ static void receive_data_server(Client *client)
 
                 case CommandType::RESUME_SERVER:
                 {
-                    if (g_server_shutdown_thread.running)
+                    if (g_server.shutdown_thread.running)
                     {
-                        kill_thread(&g_server_shutdown_thread);
+                        kill_thread(&g_server.shutdown_thread);
                         broadcast_message_to_all_clients("Server", "Server resuming, ending stop procedure");
                     }
                     else
@@ -1071,11 +1156,10 @@ static void receive_data_server(Client *client)
     }
 }
 
-
 static unsigned long client_to_server_receiver(void *param)
 {
     Client *client = (Client *)param; 
-    while (g_server_active)
+    while (g_server.active)
     {
         I32 flags = 0;
         I32 bytes_received = recv(client->socket, client->receive_buf, RECEIVE_BUF_LEN, flags);
@@ -1104,7 +1188,7 @@ static unsigned long client_to_server_receiver(void *param)
             }
 
         }
-        printf("received %d bytes from %.*s\n", bytes_received, MAX_NAME_LEN, client->name);
+        LOG_DEBUG("received %d bytes from %.*s\n", bytes_received, MAX_NAME_LEN, client->name);
         
         if (bytes_received == 0)
         {
@@ -1124,7 +1208,6 @@ static unsigned long client_to_server_receiver(void *param)
     return 0;
 }
 
-
 struct AcceptConnectionsParams
 {
     SOCKET server_socket;
@@ -1133,12 +1216,12 @@ struct AcceptConnectionsParams
 static unsigned long accept_connections(void *p)
 {
     SOCKET socket = *(SOCKET *)p;
-    while (g_server_active)
+    while (g_server.active)
     {
         struct sockaddr_in socket_addr = {};
         socket_addr.sin_family = AF_INET;
         I32 addr_len = sizeof(socket_addr);
-        if (g_connection_count < MAX_ACTIVE_THREADS)
+        if (g_server.connection_count < MAX_ACTIVE_THREADS)
         {
             SOCKET tmp_socket = accept(socket, (struct sockaddr *)&socket_addr, &addr_len);
             if (tmp_socket == INVALID_SOCKET)
@@ -1159,28 +1242,28 @@ static unsigned long accept_connections(void *p)
             // spawn receiver thread
             {
                 U32 i = 0;
-                for (i = 0; i < ARRAY_COUNT(g_client_pool); ++i)
+                for (i = 0; i < ARRAY_COUNT(g_server.client_pool); ++i)
                 {
-                    if (!g_client_pool[i].active)
+                    if (!g_server.client_pool[i].active)
                     {
                         break;
                     }
                 }
-                    g_connection_count += 1;
-                    g_client_pool[i].receive_lock = true; 
-                    g_client_pool[i].socket = tmp_socket;
-                    g_client_pool[i].active = true;
+                    g_server.connection_count += 1;
+                    g_server.client_pool[i].receive_lock = true; 
+                    g_server.client_pool[i].socket = tmp_socket;
+                    g_server.client_pool[i].active = true;
                     
-                    snprintf(g_client_pool[i].name, MAX_NAME_LEN, "%d.%d.%d.%d", 
+                    snprintf(g_server.client_pool[i].name, MAX_NAME_LEN, "%d.%d.%d.%d", 
                         socket_addr.sin_addr.S_un.S_un_b.s_b1, 
                         socket_addr.sin_addr.S_un.S_un_b.s_b2, 
                         socket_addr.sin_addr.S_un.S_un_b.s_b3, 
                         socket_addr.sin_addr.S_un.S_un_b.s_b4);
 
 
-                    g_client_pool[i].thread = spawn_thread(client_to_server_receiver, false, &g_client_pool[i]);
+                    g_server.client_pool[i].thread = spawn_thread(client_to_server_receiver, false, &g_server.client_pool[i]);
 
-                assert(i != ARRAY_COUNT(g_client_pool) - 1); // max client amount reached
+                assert(i != ARRAY_COUNT(g_server.client_pool) - 1); // max client amount reached
             }
 
             char ip_buf[30] = {};
@@ -1201,13 +1284,14 @@ static unsigned long accept_connections(void *p)
 
 static void server()
 {
-    g_server_active = true;
-    g_server_sending_semaphore = create_semaphore(0, 1);
-    g_server_sending_mutex = create_mutex();
+    g_server.active = true;
+    g_server.sending_semaphore = create_semaphore(0, 1);
+    g_server.sending_mutex = create_mutex();
 
+    LOG_INFO("initalizing socket");
     {
-        g_server_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (g_server_socket == INVALID_SOCKET)
+        g_server.socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (g_server.socket == INVALID_SOCKET)
         {
             print_last_wsaerror();
             TODO("handle failed to create server socket");
@@ -1222,13 +1306,13 @@ static void server()
         SOCK_addr.sin_addr.S_un.S_un_b.s_b3 = g_config.ip_bytes[2];
         SOCK_addr.sin_addr.S_un.S_un_b.s_b4 = g_config.ip_bytes[3];
 
-        if (bind(g_server_socket, (struct sockaddr *)&SOCK_addr, sizeof(SOCK_addr)) == SOCKET_ERROR)
+        if (bind(g_server.socket, (struct sockaddr *)&SOCK_addr, sizeof(SOCK_addr)) == SOCKET_ERROR)
         {
             print_last_wsaerror();
             TODO("handle failed to bind server socket to ip address");
         }
 
-        if (listen(g_server_socket, SOMAXCONN) == SOCKET_ERROR)
+        if (listen(g_server.socket, SOMAXCONN) == SOCKET_ERROR)
         {
             print_last_wsaerror();
             TODO("handle failed to set socket to listener");
@@ -1238,34 +1322,33 @@ static void server()
     Thread sender_thread = spawn_thread(server_sender, false, nullptr);
 
     // main thread accepts connections
-    accept_connections((void *)&g_server_socket);
+    accept_connections((void *)&g_server.socket);
 
     // gracefully exit server
     {
         /*
-        if (shutdown(g_server_socket, 2) == SOCKET_ERROR) // SD_Both
+        if (shutdown(g_server.socket, 2) == SOCKET_ERROR) // SD_Both
         {
             print_last_wsaerror();
             exit(1);
         }
-        if (closesocket(g_server_socket) == SOCKET_ERROR)
+        if (closesocket(g_server.socket) == SOCKET_ERROR)
         {
             print_last_wsaerror();
             exit(1);
         }
         */
-        release_semaphore(&g_server_sending_semaphore);
+        release_semaphore(&g_server.sending_semaphore);
 
         join_thread(&sender_thread);
 
-        clean_mutex(&g_server_sending_mutex);
-        clean_semaphore(&g_server_sending_semaphore);
+        clean_mutex(&g_server.sending_mutex);
+        clean_semaphore(&g_server.sending_semaphore);
 
     }
 }
 
 #pragma endregion
-
 
 static char g_name_buffer[MAX_NAME_LEN + 1] = {}; // + 1 for null termination
 
@@ -1274,6 +1357,7 @@ int main(int argc, char *argv[])
     const char *program = argv[0]; (void)program;
 
     // initalize config
+    LOG_INFO("initalizing config");
     for (I32 i = 1; i < argc; ++i)
     {
         if (argv[i][0] == '-')
@@ -1373,16 +1457,19 @@ int main(int argc, char *argv[])
         }
     }
 
-    printf("Config [Host: %u, port: %u, Ip: %u.%u.%u.%u]\n", g_config.host, g_config.port, g_config.ip_bytes[0], g_config.ip_bytes[1], g_config.ip_bytes[2], g_config.ip_bytes[3]);
+    LOG_DEBUG("Config [Host: %u, port: %u, Ip: %u.%u.%u.%u]\n", g_config.host, g_config.port, g_config.ip_bytes[0], g_config.ip_bytes[1], g_config.ip_bytes[2], g_config.ip_bytes[3]);
     
+    LOG_INFO("initalizing WSA");
     init_WSA();
 
     if (g_config.host == true)
     {
+        LOG_INFO("Starting server");
         server();
     }
     else
     {
+        LOG_INFO("Starting client");
         client(g_name_buffer);
     }
 
