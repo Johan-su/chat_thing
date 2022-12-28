@@ -51,7 +51,7 @@ static_assert(sizeof(I64) == 8);
 #define LOG_LEVEL_DEBUG 4
 
 
-#define LOG_LEVEL LOG_LEVEL_INFO
+#define LOG_LEVEL LOG_LEVEL_DEBUG
 
 #if LOG_LEVEL >= LOG_LEVEL_NONE
 
@@ -65,28 +65,28 @@ static FILE *stream = stdout;
 #define INTERNAL_LOG_(level, format, vargs...) \
 do \
 { \
-    fprintf(stream, "[%s] " format "\n", level, vargs); \
+    fprintf(stream, "%s " format "\x1b[37m\n", level, vargs); \
 } while (0)
 
 
 #if LOG_LEVEL >= LOG_LEVEL_ERROR
 #undef LOG_ERROR
-#define LOG_ERROR(format, vargs...) INTERNAL_LOG_("ERROR", format, vargs)
+#define LOG_ERROR(format, vargs...) INTERNAL_LOG_("\x1b[31m[ERROR]", format, vargs)
 #endif
 
 #if LOG_LEVEL >= LOG_LEVEL_WARN
 #undef LOG_WARN
-#define LOG_WARN(format, vargs...) INTERNAL_LOG_("WARNING", format, vargs)
+#define LOG_WARN(format, vargs...) INTERNAL_LOG_("\x1b[33m[WARNING]", format, vargs)
 #endif
 
 #if LOG_LEVEL >= LOG_LEVEL_INFO
 #undef LOG_INFO
-#define LOG_INFO(format, vargs...) INTERNAL_LOG_("INFO", format, vargs)
+#define LOG_INFO(format, vargs...) INTERNAL_LOG_("\x1b[94m[INFO]", format, vargs)
 #endif
 
 #if LOG_LEVEL >= LOG_LEVEL_DEBUG
 #undef LOG_DEBUG
-#define LOG_DEBUG(format, vargs...) INTERNAL_LOG_("DEBUG", format, vargs)
+#define LOG_DEBUG(format, vargs...) INTERNAL_LOG_("\x1b[32m[DEBUG]", format, vargs)
 #endif
 
 #endif
@@ -492,7 +492,7 @@ struct ServerBroadcast
     char name[MAX_NAME_LEN];
     char message[MAX_MESSAGE_LEN];
 };
-static_assert(sizeof(ServerBroadcast)<= RECEIVE_BUF_LEN);
+static_assert(sizeof(ServerBroadcast) <= RECEIVE_BUF_LEN);
 
 #pragma region CommandList
 
