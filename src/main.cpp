@@ -66,7 +66,7 @@ static FILE *stream = stdout;
 do \
 { \
     fprintf(stream, "[%s] ", level); \
-    fprintf(stream, format, vargs); \
+    fprintf(stream, format, vargs); \ //TODO(Johan): convert to a single function call, to avoid race conditions with other threads calling print
     fprintf(stream, "\n"); \
 } while (0)
 
