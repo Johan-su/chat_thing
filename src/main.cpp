@@ -65,9 +65,7 @@ static FILE *stream = stdout;
 #define INTERNAL_LOG_(level, format, vargs...) \
 do \
 { \
-    fprintf(stream, "[%s] ", level); \
-    fprintf(stream, format, vargs); \ //TODO(Johan): convert to a single function call, to avoid race conditions with other threads calling print
-    fprintf(stream, "\n"); \
+    fprintf(stream, "[%s] " format "\n", level, vargs); \
 } while (0)
 
 
@@ -94,12 +92,12 @@ do \
 #endif
 
 
-#define TODO(string)                                                                   \
-    do                                                                                 \
-    {                                                                                  \
-        fprintf(stderr, "ERROR: TODO %s, at %s:%d in \n", string, __FILE__, __LINE__); \
-        exit(1);                                                                       \
-    } while (0)
+#define TODO(string)                                                               \
+do                                                                                 \
+{                                                                                  \
+    fprintf(stderr, "ERROR: TODO %s, at %s:%d in \n", string, __FILE__, __LINE__); \
+    exit(1);                                                                       \
+} while (0)
 
 
 #define ARRAY_COUNT(array) sizeof(array) / sizeof(array[0])
@@ -769,8 +767,6 @@ static unsigned long receiver(void *param)
     return 0;
 }
 
-
-
 static void client(const char *name)
 {
     g_client_active = true;
@@ -797,17 +793,19 @@ static void client(const char *name)
         SOCK_addr.sin_addr.S_un.S_un_b.s_b3 = g_config.ip_bytes[2];
         SOCK_addr.sin_addr.S_un.S_un_b.s_b4 = g_config.ip_bytes[3];
 
-        LOG_INFO("Connecting to server");
+        LOG_INFO("Connecting to server...");
         if (connect(connect_socket, (const struct sockaddr *)&SOCK_addr, sizeof(SOCK_addr)) == SOCKET_ERROR)
         {
             print_last_wsaerror();
             TODO("handle failed connection");
         }
+        LOG_INFO("Connected to server");
     }
     
     {
         char receive_buf[RECEIVE_BUF_LEN];
 
+        LOG_DEBUG("Spawning sender thread");
         Thread send_thread = spawn_thread(client_sender, false, &connect_socket);
 
         ReceiverParams rparams = {
@@ -816,8 +814,10 @@ static void client(const char *name)
             .receive_len = ARRAY_COUNT(receive_buf),
         };
 
+        LOG_DEBUG("Spawning receiver thread");
         Thread receive_thread = spawn_thread(receiver, false, &rparams);
 
+        LOG_DEBUG("Entering command loop");
         {
             char command_buffer[MAX_COMMAND_LEN + 3]; // + 3 for '/' '\n' and '\0'
             
@@ -1319,10 +1319,12 @@ static void server()
         }
     }
 
+    LOG_DEBUG("spawn sender thread");
     Thread sender_thread = spawn_thread(server_sender, false, nullptr);
 
     // main thread accepts connections
     accept_connections((void *)&g_server.socket);
+    LOG_INFO("accepting connections");
 
     // gracefully exit server
     {
