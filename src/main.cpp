@@ -630,6 +630,7 @@ static unsigned long client_sender(void *p)
         I32 bytes_sent = send(socket, g_client_message_buffer, SEND_BUF_LEN, flags);
         if (bytes_sent == SOCKET_ERROR)
         {
+            print_last_wsaerror();
             TODO("handle failed to send bytes");
         }
         LOG_DEBUG("sent %d bytes\n", bytes_sent);
@@ -990,6 +991,7 @@ static unsigned long server_sender(void *)
                     I32 bytes_sent = send(g_server.client_pool[i].socket, g_server.data_buffer, SEND_BUF_LEN, flags);
                     if (bytes_sent == SOCKET_ERROR)
                     {
+                        print_last_wsaerror();
                         TODO("handle failed to send bytes");
                     }
                     LOG_DEBUG("sent %d bytes\n", bytes_sent);
@@ -1004,6 +1006,7 @@ static unsigned long server_sender(void *)
                 I32 bytes_sent = send(g_server.private_client->socket, g_server.data_buffer, SEND_BUF_LEN, flags);
                 if (bytes_sent == SOCKET_ERROR)
                 {
+                    print_last_wsaerror();
                     TODO("handle failed to send bytes");
                 }
                 LOG_DEBUG("sent %d bytes\n", bytes_sent);
