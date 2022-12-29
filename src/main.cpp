@@ -151,6 +151,28 @@ static bool is_str(const char *str1, const char *str2)
     return true;
 }
 
+static bool is_nstr(const char *str1, const char *str2, Usize max_len)
+{
+    if (str1 == nullptr || str2 == nullptr)
+    {
+        return false;
+    }
+
+    for (Usize i = 0; i < max_len; ++i)
+    {
+        if (str1[i] != str2[i])
+        {
+            return false;
+        }
+        if (str1[i] == '\0' || str2[i] == '\0')
+        {
+            break;
+        }
+    }
+
+    return true;
+}
+
 static bool is_part_str_range(const char *str1, Usize start, Usize end, const char *part_str)
 {
     if (str1 == nullptr || part_str == nullptr)
@@ -195,6 +217,37 @@ static bool is_number(char chr)
         case '9': return true;
         
         default: return false;
+    }
+}
+
+static bool is_whitespace(char c)
+{
+    if (c > '\0' && c <= ' ')
+    {
+        return true;
+    }
+
+    return false;
+}
+
+static void move_past_whitespace(const char *str, I64 *pos)
+{
+    while (is_whitespace(str[*pos]))
+    {
+        *pos += 1;
+    }
+    if (str[*pos] == '\0')
+    {
+        *pos = -1;
+        return;
+    }
+}
+
+static void move_until_whitespace_or_null(const char *str, I64 *pos)
+{
+    while (!is_whitespace(str[*pos]) && str[*pos] != '\0')
+    {
+        *pos += 1;
     }
 }
 
@@ -570,8 +623,11 @@ static void help(char *command_buffer, Usize buf_len)
 {
     
     I64 pos = pos_in_nstr(command_buffer, buf_len, ' ');
-
-    if (pos == -1 || command_buffer[pos + 1] == '\0')
+    if (pos != -1)
+    {
+        move_past_whitespace(command_buffer, &pos);
+    }
+    if (pos == -1)
     {
         for (Usize i = 0; i < ARRAY_COUNT(g_client_commands); ++i)
         {
@@ -579,22 +635,120 @@ static void help(char *command_buffer, Usize buf_len)
             {
                 break;
             }
-            printf("%s: %s\n", g_client_commands[i].name, g_client_commands[i].desc);
+            printf("%s\n", g_client_commands[i].name);
         }
     }
     else
     {
-        TODO("implement help for specific commands");
+        Usize i = 0;
+        bool found = false;
+        for (; i < ARRAY_COUNT(g_client_commands); ++i)
+        {
+            if (g_client_commands[i].name == nullptr)
+            {
+                break;
+            }
+            if (is_str(&command_buffer[pos], g_client_commands[i].name))
+            {
+                found = true;
+                break;
+            }
+        }
+        if (found)
+        {
+            printf("%s:\n%s\n", g_client_commands[i].name, g_client_commands[i].desc);
+        }
+        else
+        {
+            printf("Command not found, try /help to list all commands\n");
+        }
     }
 }
 
+static void next_arg(char *command_buffer, I64 *start_pos, I64 *end_pos)
+{
+    if (command_buffer[*start_pos + 1] == '\0')
+    {
+        *start_pos = -1;
+        return;
+    }
+    *start_pos += 1;
+    move_past_whitespace(command_buffer, start_pos);
+    if (*start_pos == -1)
+    {
+        return;
+    }
+
+    *end_pos = *start_pos;
+    move_until_whitespace_or_null(command_buffer, end_pos);
+    *end_pos -= 1;
+}
+
+
+static void whisper(char *command_buffer, Usize buf_len)
+{
+    PrivateMessage pm =
+    {
+        .format = PRIVATE_MESSAGE,
+        .name = {0},
+        .message = {0},
+    };
+
+
+    I64 command_start = pos_in_nstr(command_buffer, buf_len, ' ');
+    {
+        if (command_start == -1)
+        {
+            TODO("handle error whisper with no arguments");
+        }
+        command_start -= 1;
+    }
+
+    I64 arg_start = command_start;
+    I64 arg_end;
+
+    // parse the first (name) argument
+    {
+        next_arg(command_buffer, &arg_start, &arg_end);
+        if (arg_start == -1)
+        { 
+            printf("/[w]hisper <name> <message>\n");
+            return;
+        }
+        Usize name_len = (Usize)(arg_end + 1 - arg_start);
+        if (name_len > MAX_NAME_LEN)
+        {
+            printf("Name cannot be longer than %d characters\n", MAX_NAME_LEN);
+            return;
+        }
+        memcpy(&pm.name, &command_buffer[arg_start], sizeof(char) * (name_len));
+    }
+
+
+    // parse message argument
+    {
+        arg_start = arg_end;
+        next_arg(command_buffer, &arg_start, &arg_end);
+        if (arg_start == -1)
+        {
+            printf("/[w]hisper <name> <message>\n");
+            return;
+        }
+        Usize message_len = (Usize)(arg_end + 1 - arg_start);
+        memcpy(&pm.message, &command_buffer[arg_start], sizeof(char) * message_len);
+    }
+    send_data((char *)&pm, sizeof(pm));
+}
+
 ClientCommand g_client_commands[COMMAND_LIST_CAPACITY] = {
-    {"quit", quit, ""},
-    {"change_name", change_name, ""},
-    {"stop", stop, ""},
-    {"resume", resume, ""},
-    {"help", help, ""},
-    {"h", help, ""},
+    {"quit", quit, "/quit leaves the server"},
+    {"change_name", change_name, "/change_name <name> changes the name to <name>"},
+    {"stop", stop, "/stop stop the server after some time"},
+    {"resume", resume, "/resume resumes the server during a stop sequence"},
+    {"help", help, "/help provides a list of commands, /help <command> explains a specific command"},
+    {"h", help, "same as /help"},
+    {"whisper", whisper, "/whisper <name> <message> sends a private message only seen by the user to another user"},
+    {"w", whisper, "same as /whisper"},
 };
 
 #pragma endregion
@@ -641,7 +795,6 @@ static unsigned long client_sender(void *p)
     }
     return 0;
 }
-
 
 static void send_data(char *byte_buffer, Usize buf_size)
 {
@@ -850,6 +1003,7 @@ static void client(const char *name)
                     bool found_func = false;
                     for (Usize i = 0; i < COMMAND_LIST_CAPACITY; ++i)
                     {
+                        //TODO(Johan): fix bug with this, /h help gives the same as /help h and /help w, /help whisper
                         if (is_part_str_range(command_buffer, 1, space_pos, g_client_commands[i].name))
                         {
                             g_client_commands[i].func(command_buffer, ARRAY_COUNT(command_buffer));
@@ -985,17 +1139,30 @@ static unsigned long server_sender(void *)
         {
             for (Usize i = 0; i < ARRAY_COUNT(g_server.client_pool); ++i)
             {
-                if (g_server.client_pool[i].active)
+                if (!g_server.client_pool[i].active)
                 {
-                    I32 flags = 0;
-                    I32 bytes_sent = send(g_server.client_pool[i].socket, g_server.data_buffer, SEND_BUF_LEN, flags);
-                    if (bytes_sent == SOCKET_ERROR)
-                    {
-                        print_last_wsaerror();
-                        TODO("handle failed to send bytes");
-                    }
-                    LOG_DEBUG("sent %d bytes\n", bytes_sent);
+                    continue;
                 }
+                I32 flags = 0;
+                I32 bytes_sent = send(g_server.client_pool[i].socket, g_server.data_buffer, SEND_BUF_LEN, flags);
+                if (bytes_sent == SOCKET_ERROR)
+                {
+                    switch(WSAGetLastError())
+                    {
+                        case WSAECONNRESET:
+                        {
+                            g_server.client_pool[i].active = false;
+                            closesocket(g_server.client_pool[i].socket);   
+                        } break;
+
+                        default:
+                        {
+                            print_last_wsaerror();
+                            TODO("handle failed to send bytes");
+                        } break;
+                    }
+                }
+                LOG_DEBUG("sent %d bytes\n", bytes_sent);
             }
         }
         else
@@ -1070,7 +1237,7 @@ static void server_send_private_message(const char *name, const char *message, C
     memcpy(pm.name, name, sizeof(char) * name_len);
     memcpy(pm.message, message, sizeof(char) * message_len);
     memcpy(g_server.data_buffer, &pm, sizeof(pm));
-    printf("%.*s : %.*s\n", MAX_NAME_LEN, pm.name, MAX_MESSAGE_LEN, pm.message);
+    printf("%.*s [pm] -> %.*s : %.*s\n", MAX_NAME_LEN, pm.name, MAX_NAME_LEN, client->name, MAX_MESSAGE_LEN, pm.message);
     g_server.broadcast = false;
     g_server.private_client = client;
     g_server.data_send_lock = false;
@@ -1080,6 +1247,23 @@ static void server_send_private_message(const char *name, const char *message, C
     {}
 
     release_mutex(&g_server.sending_mutex);
+}
+
+static Client *get_client_by_name(char *name)
+{
+    Client *client = nullptr;
+    for (Usize i = 0; i < ARRAY_COUNT(g_server.client_pool); ++i)
+    {
+        if (g_server.client_pool[i].active)
+        {
+            if (is_nstr(name, g_server.client_pool[i].name, MAX_NAME_LEN))
+            {
+                client = &g_server.client_pool[i];        
+                break;
+            }
+        }
+    }
+    return client;
 }
 
 static void receive_data_server(Client *client)
@@ -1102,7 +1286,18 @@ static void receive_data_server(Client *client)
 
         case DataFormat::PRIVATE_MESSAGE:
         {
-            TODO("handle private message");
+            PrivateMessage *pm = (PrivateMessage *)raw_data;
+
+            Client *receive_client = get_client_by_name(pm->name);
+            if (receive_client != nullptr)
+            {
+                server_send_private_message(client->name, pm->message, receive_client);   
+            }
+            else
+            {
+                server_send_private_message("Server", "user name not found", client);
+            }
+
         } return;
 
         case DataFormat::COMMAND:
@@ -1113,11 +1308,19 @@ static void receive_data_server(Client *client)
             {
                 case CHANGE_NAME:
                 {
-                    char message_buffer[2 * MAX_NAME_LEN + 17 + 1] = {};
+                    Client *receive_client = get_client_by_name(command->data);
+                    if (receive_client == nullptr)
+                    {
+                        char message_buffer[2 * MAX_NAME_LEN + 17 + 1] = {};
 
-                    snprintf(message_buffer, sizeof(message_buffer), "%.*s changed name to %.*s", MAX_NAME_LEN, client->name, MAX_NAME_LEN, command->data);
-                    memcpy(client->name, command->data, MAX_NAME_LEN);
-                    broadcast_message_to_all_clients("Server", message_buffer);
+                        snprintf(message_buffer, sizeof(message_buffer), "%.*s changed name to %.*s", MAX_NAME_LEN, client->name, MAX_NAME_LEN, command->data);
+                        memcpy(client->name, command->data, MAX_NAME_LEN);
+                        broadcast_message_to_all_clients("Server", message_buffer);
+                    } 
+                    else
+                    {
+                        server_send_private_message("Server", "user name already taken", client);
+                    }
                 } break;
 
                 case CommandType::STOP_SERVER:
